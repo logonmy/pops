@@ -211,26 +211,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.send_error(httplib.NOT_FOUND)
 
 
-    # def do_POST(self):
-    #     """
-    #     See also
-    #      - http://stackoverflow.com/questions/4233218/python-basehttprequesthandler-post-variables
-    #     """
-    #
-    #     ctype, pdict = cgi.parse_header(self.headers.getheader('content-type'))
-    #     if ctype == 'multipart/form-data':
-    #         postvars = cgi.parse_multipart(self.rfile, pdict)
-    #     elif ctype == 'application/x-www-form-urlencoded':
-    #         length = int(self.headers.getheader('content-length'))
-    #         # postvars = cgi.parse_qs(self.rfile.read(length), keep_blank_values=1)
-    #         postvars = urlparse.parse_qs(self.rfile.read(length), keep_blank_values=1)
-    #     else:
-    #         postvars = {}
-    #
-    #     self.send_response(301)
-    #     self.send_header("Location", "/")
-    #     self.end_headers()
-
     def _proxy_server_incr_concurrency(self, top_domain_name, step=1):
         free_proxy_server_addr = None
 
@@ -272,7 +252,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         top_domain_name = get_top_domain_name(parse.netloc)
 
         free_proxy_server_addr = None
-
         while not free_proxy_server_addr:
             free_proxy_server_addr = self._proxy_server_incr_concurrency(top_domain_name, step=1)
 
