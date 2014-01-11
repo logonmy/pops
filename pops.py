@@ -9,6 +9,7 @@ Proxy of Proxy Sever
                    |
                    +...
 """
+import argparse
 import copy
 import logging
 import re
@@ -22,6 +23,7 @@ import socket
 import sys
 import urlparse
 
+from daemon import runner
 import requests
 import requests.exceptions
 
@@ -169,12 +171,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.request.settimeout(3)
 
     def log_message(self, format, *args):
-        # if LOGGING_USES_PROCESS_NAME_PREFIX:
-        #     sys.stderr.write('[%s] %s\n' % (multiprocessing.current_process().name,
-        #                                     format % args))
-        # else:
-        #     BaseHTTPServer.BaseHTTPRequestHandler.log_message(self, format, *args)
-
         logger.debug(format % args)
 
     def do_HEAD(self):
@@ -355,14 +351,6 @@ def serve_forever_main(httpd_inst):
     finally:
         httpd_inst.server_close()
 
-    # leave some time for children quit by themselves,
-    # and release sharing resources
-    time.sleep(0.5)
-
-    for p in multiprocessing.active_children():
-        p.terminate()
-        logger.info('%s PID %s terminated' % (p.name, p.pid))
-
 
 class POPServer(BaseHTTPServer.HTTPServer):
 
@@ -410,12 +398,16 @@ def check_proxy_list(httpd_inst):
 
     except KeyboardInterrupt:
         pass
+
+    except IOError:
+        pass
+
     finally:
         httpd_inst.server_close()
 
 
-def main(port):
-    server_address = ('', port)
+def main(args):
+    server_address = (args.addr, args.port)
     httpd_inst = POPServer(server_address, HandlerClass)
 
     mp_manager = multiprocessing.Manager()
@@ -443,17 +435,66 @@ def main(port):
     logger.info("Serving HTTP on %s port %s ..."  % (sa[0], sa[1]))
 
     for i in range((multiprocessing.cpu_count() * 2)):
-        multiprocessing.Process(target=serve_forever, args=(httpd_inst,)).start()
+        p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
+        p.daemon = args.daemon
+        p.start()
 
-    multiprocessing.Process(target=check_proxy_list, name='CheckProxyListProcess', args=(httpd_inst,)).start()
+    p = multiprocessing.Process(target=check_proxy_list, name='CheckProxyListProcess', args=(httpd_inst,))
+    p.daemon = args.daemon
+    p.start()
 
     serve_forever_main(httpd_inst)
 
 
-if __name__ == "__main__":
-    args = sys.argv[1:]
-    port = 1080
-    if args:
-       port = args[0]
+class MyDaemon(object):
 
-    main(port)
+    def __init__(self, args):
+        self.args = args
+
+        self.stdin_path = '/dev/null'
+        self.stdout_path = '/dev/tty'
+        self.stderr_path = args.error_log
+        self.pidfile_path = args.pid
+        self.pidfile_timeout = 3
+
+    def run(self):
+        main(self.args)
+
+class MyDaemonRunner(runner.DaemonRunner):
+
+    def __init__(self, app, action):
+        self.action = action
+        runner.DaemonRunner.__init__(self, app)
+        # self.daemon_context.stderr = open(app.stderr_path, 'a', buffering=0)
+
+    def parse_args(self, *args, **kwargs):
+        """
+        We parse arguments by ourselves.
+        """
+        pass
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(prog=sys.argv[0], description='')
+
+    parser.add_argument('--addr', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=1080)
+
+    parser.add_argument('--error_log', default=sys.stderr)
+    parser.add_argument('--pid')
+
+    parser.add_argument('--daemon', action='store_true')
+    parser.add_argument('--stop', action='store_true')
+
+    args = parser.parse_args()
+
+    if args.daemon or args.stop:
+        if args.stop:
+            action = 'stop'
+        else:
+            action = 'start'
+
+        d_runner = MyDaemonRunner(MyDaemon(args), action)
+        d_runner.do_action()
+    else:
+        main(args)
+
