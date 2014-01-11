@@ -63,6 +63,10 @@ def stat(httpd_inst):
     httpd_inst.send_header('Content-Type', 'application/json')
     httpd_inst.end_headers()
 
+    info_d = {
+        'mode': httpd_inst.server.args.mode,
+    }
+
     stat_info_d = {}
     for k in httpd_inst.server.stat_info.keys():
         stat_info_d[k] = httpd_inst.server.stat_info[k]
@@ -82,6 +86,7 @@ def stat(httpd_inst):
     stat_info_d['total_nodes'] = len(proxy_list_d.keys())
 
     migrated = {
+        'info': info_d,
         'stat': stat_info_d,
         'proxy_list': proxy_list_d,
     }
@@ -89,6 +94,12 @@ def stat(httpd_inst):
     httpd_inst.wfile.write(default_body)
 
 def admin(httpd_inst):
+    allow_hosts = ('127.0.0.1', 'localhost')
+
+    if httpd_inst.server.server_name not in allow_hosts:
+        httpd_inst.send_error(httplib.FORBIDDEN)
+        return
+
     parse = urlparse.urlparse(httpd_inst.path)
 
     if parse.path == '/admin/proxy/add':
@@ -188,7 +199,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.server.stat_info['waiting_requests'] += 1
             self.server.lock.release()
 
-            self._do_proxy()
+            if self.server.args.mode == 'slot':
+                self._do_slot_proxy()
+            else:
+                self._do_proxy()
 
             self.server.lock.acquire()
             self.server.stat_info['waiting_requests'] -= 1
@@ -243,6 +257,74 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         return free_proxy_server_addr
 
     def _do_proxy(self):
+        url = self.path
+
+        try:
+            r = getattr(requests, self.command.lower())(
+                url=url,
+                timeout=PROXY_SERVER_SEND_TIMEOUT_IN_SECONDS)
+            entry_body = r.content
+
+            # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
+            hop_by_hop_headers_drop = (
+                'TE',
+                'Transfer-Encoding',
+                'Keep-Alive',
+                'Proxy-Authorization',
+                'Proxy-Authentication',
+                'Trailer',
+                'Upgrade',
+            )
+
+            headers_filtered = {}
+            for k in r.headers.keys():
+                if k.lower() not in (i.lower() for i in hop_by_hop_headers_drop):
+                    headers_filtered[k] = r.headers[k]
+
+            # TODO: we should not modified header 'Content-Encoding',
+            # because IETF standard said you should not, see also
+            # http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-14#section-7.1.3.2
+            if len(entry_body):
+                if 'content-encoding' in headers_filtered:
+                    headers_filtered.pop('content-encoding')
+                headers_filtered['content-length'] = len(entry_body)
+
+
+            self.send_response(r.status_code)
+            for k in headers_filtered.keys():
+                self.send_header(k, headers_filtered[k])
+            self.end_headers()
+
+            if self.command != "HEAD":
+                self.wfile.write(entry_body)
+
+
+            self.server.lock.acquire()
+            self.server.stat_info['proxy_requests'] += 1
+            self.server.lock.release()
+
+        except requests.exceptions.Timeout:
+            self.log_error('Request %s timeout' % self.path)
+
+            self.send_response(httplib.GATEWAY_TIMEOUT)
+            self.end_headers()
+
+        except requests.exceptions.ConnectionError:
+            self.log_error('Request %s connection refused' % self.path)
+
+            self.send_response(httplib.SERVICE_UNAVAILABLE)
+            self.end_headers()
+
+        except socket.timeout:
+            self.log_error('Request %s timeout' % self.path)
+
+            self.send_response(httplib.GATEWAY_TIMEOUT)
+            self.end_headers()
+
+        finally:
+            pass
+
+    def _do_slot_proxy(self):
         url = self.path
         parse = urlparse.urlparse(url)
         top_domain_name = get_top_domain_name(parse.netloc)
@@ -340,18 +422,6 @@ def serve_forever(httpd_inst):
         httpd_inst.server_close()
 
 
-def serve_forever_main(httpd_inst):
-    try:
-        logger.info('%s started' % multiprocessing.current_process().name)
-        # while True:
-        #     httpd_inst.handle_request()
-        httpd_inst.serve_forever()
-    except KeyboardInterrupt:
-        pass
-    finally:
-        httpd_inst.server_close()
-
-
 class POPServer(BaseHTTPServer.HTTPServer):
 
     allow_reuse_address = True
@@ -409,6 +479,7 @@ def check_proxy_list(httpd_inst):
 def main(args):
     server_address = (args.addr, args.port)
     httpd_inst = POPServer(server_address, HandlerClass)
+    httpd_inst.args = args
 
     mp_manager = multiprocessing.Manager()
     httpd_inst.mp_manager = mp_manager
@@ -436,14 +507,17 @@ def main(args):
 
     for i in range((multiprocessing.cpu_count() * 2)):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
-        p.daemon = args.daemon
+        if args.daemon:
+            p.daemon = args.daemon
         p.start()
 
-    p = multiprocessing.Process(target=check_proxy_list, name='CheckProxyListProcess', args=(httpd_inst,))
-    p.daemon = args.daemon
-    p.start()
+    if args.mode == 'slot':
+        p = multiprocessing.Process(target=check_proxy_list, name='CheckProxyListProcess', args=(httpd_inst,))
+        if args.daemon:
+            p.daemon = args.daemon
+        p.start()
 
-    serve_forever_main(httpd_inst)
+    serve_forever(httpd_inst)
 
 
 class MyDaemon(object):
@@ -460,12 +534,12 @@ class MyDaemon(object):
     def run(self):
         main(self.args)
 
+
 class MyDaemonRunner(runner.DaemonRunner):
 
     def __init__(self, app, action):
         self.action = action
         runner.DaemonRunner.__init__(self, app)
-        # self.daemon_context.stderr = open(app.stderr_path, 'a', buffering=0)
 
     def parse_args(self, *args, **kwargs):
         """
@@ -473,11 +547,13 @@ class MyDaemonRunner(runner.DaemonRunner):
         """
         pass
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog=sys.argv[0], description='')
 
     parser.add_argument('--addr', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=1080)
+    parser.add_argument('--mode', choices=['solt', 'client'], default='client')
 
     parser.add_argument('--error_log', default=sys.stderr)
     parser.add_argument('--pid')
