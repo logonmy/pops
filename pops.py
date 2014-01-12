@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 """
 Proxy of Proxy Sever
 
@@ -550,7 +551,7 @@ class MyDaemonRunner(runner.DaemonRunner):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(prog=sys.argv[0], description='')
+    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS')
 
     parser.add_argument('--addr', default='127.0.0.1')
     parser.add_argument('--port', type=int, default=1080)
