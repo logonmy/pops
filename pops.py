@@ -581,18 +581,39 @@ class MyDaemonRunner(runner.DaemonRunner):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS')
 
-    parser.add_argument('--auth', default='god:hidemyass')
-    parser.add_argument('--proxy_auth', default='god:hidemyass')
+    parser.add_argument('--auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
 
-    parser.add_argument('--addr', default='127.0.0.1')
-    parser.add_argument('--port', type=int, default=1080)
-    parser.add_argument('--mode', choices=['slot_proxy', 'proxy'], default='proxy')
+    parser.add_argument('--proxy_auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
 
-    parser.add_argument('--error_log', default=sys.stderr)
+    parser.add_argument('--addr',
+                        default='127.0.0.1',
+                        help='default 127.0.0.1')
+
+    parser.add_argument('--port',
+                        type=int,
+                        default=1080,
+                        help='default 1080')
+
+    parser.add_argument('--mode',
+                        choices=['slot_proxy', 'proxy'],
+                        default='proxy',
+                        help='default mode')
+
+    parser.add_argument('--error_log',
+                        default=sys.stderr,
+                        help='default /dev/stderr')
+
     parser.add_argument('--pid')
 
     parser.add_argument('--daemon', action='store_true')
-    parser.add_argument('--stop', action='store_true')
+    
+    parser.add_argument('--stop',
+                        action='store_true',
+                        help='default start')
 
     args = parser.parse_args()
 
