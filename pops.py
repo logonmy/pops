@@ -462,6 +462,8 @@ def check_proxy_list(httpd_inst):
         logger.info('%s started' % multiprocessing.current_process().name)
 
         while True:
+            time.sleep(PROXY_SERVER_CHECK_INTERVAL_IN_SECONDS)
+
             httpd_inst.lock.acquire()
 
             my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
@@ -489,8 +491,6 @@ def check_proxy_list(httpd_inst):
             httpd_inst.proxy_list.update(new_proxy_list)
 
             httpd_inst.lock.release()
-
-            time.sleep(PROXY_SERVER_CHECK_INTERVAL_IN_SECONDS)
 
     except KeyboardInterrupt:
         pass
@@ -556,7 +556,7 @@ class MyDaemon(object):
         self.args = args
 
         self.stdin_path = '/dev/null'
-        self.stdout_path = '/dev/tty'
+        self.stdout_path = '/dev/stdout'
         self.stderr_path = args.error_log
         self.pidfile_path = args.pid
         self.pidfile_timeout = 3
@@ -601,7 +601,7 @@ if __name__ == "__main__":
     parser.add_argument('--mode',
                         choices=['slot_proxy', 'proxy'],
                         default='proxy',
-                        help='default mode')
+                        help='default proxy')
 
     parser.add_argument('--error_log',
                         default=sys.stderr,
@@ -610,7 +610,7 @@ if __name__ == "__main__":
     parser.add_argument('--pid')
 
     parser.add_argument('--daemon', action='store_true')
-    
+
     parser.add_argument('--stop',
                         action='store_true',
                         help='default start')
