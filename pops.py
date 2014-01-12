@@ -64,7 +64,8 @@ def stat(httpd_inst):
     httpd_inst.end_headers()
 
     info_d = {
-        'mode': httpd_inst.server.args.mode,
+        'service_mode': httpd_inst.server.args.mode,
+        'cpu_count': multiprocessing.cpu_count(),
     }
 
     stat_info_d = {}
