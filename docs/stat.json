@@ -1,0 +1,24 @@
+{
+  "server_info": {
+    "service_mode": "slot_proxy", 
+    "cpu_count": 4
+  }, 
+  "proxy_list": {
+    "192.168.1.100:1025": {
+      "_status": 1,
+      // 1 means up and running,
+      // 0 means deleted or locked and client should not uses it,
+      //  -2 means there are two times is down in available testing
+
+      "foo.com": 1,
+      "bar.com": 0
+    },
+    "172.10.10.100:1025": {}
+  }, 
+  "server_stat": {
+    "waiting_requests": 0, 
+    "proxy_requests": 0, 
+    "requests": 29, 
+    "total_nodes": 14
+  }
+}

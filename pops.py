@@ -1,15 +1,4 @@
 #!/usr/bin/env python
-"""
-Proxy of Proxy Sever
-
-    client(s) ---> pops ---> HTTP proxy server A
-                   |
-                   +---> HTTP proxy server B
-                   |
-                   +---> HTTP proxy server C
-                   |
-                   +...
-"""
 import argparse
 import base64
 import copy
@@ -48,6 +37,12 @@ logging.basicConfig(format='%(asctime)s [%(levelname)s] [%(process)d] %(message)
                     datefmt='%Y-%m-%d %I:%M:%S',
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+
+class ProxyNodeStatus(object):
+
+    DELETED_OR_LOCKED = 0
+    UP_AND_RUNNING = 1
 
 
 def www_auth_required(func):
@@ -93,16 +88,17 @@ def stat(req):
     req.send_header('Content-Type', 'application/json')
     req.end_headers()
 
-    info_d = {
+    server_info_d = {
         'service_mode': req.server.args.mode,
         'cpu_count': multiprocessing.cpu_count(),
     }
 
-    stat_info_d = {}
-    for k in req.server.stat_info.keys():
-        stat_info_d[k] = req.server.stat_info[k]
+    server_stat_d = {}
+    for k in req.server.server_stat.keys():
+        server_stat_d[k] = req.server.server_stat[k]
 
     proxy_list_d = {}
+    total_up_nodes = 0
     for proxy_server_addr in req.server.proxy_list.keys():
         domain_name_map = req.server.proxy_list[proxy_server_addr]
 
@@ -114,11 +110,14 @@ def stat(req):
             }
             proxy_list_d[proxy_server_addr].update(item)
 
-    stat_info_d['total_nodes'] = len(proxy_list_d.keys())
+        total_up_nodes += domain_name_map['_status']
+
+    server_stat_d['total_nodes'] = len(proxy_list_d.keys())
+    server_stat_d['total_up_nodes'] = total_up_nodes
 
     migrated = {
-        'info': info_d,
-        'stat': stat_info_d,
+        'server_info': server_info_d,
+        'server_stat': server_stat_d,
         'proxy_list': proxy_list_d,
     }
     entry_body = json.dumps(migrated, indent=2) + "\n"
@@ -137,17 +136,17 @@ def admin(req):
 
     parse = urlparse.urlparse(req.path)
     qs_in_d = urlparse.parse_qs(parse.query)
-    addr = qs_in_d['addr']
+    addr = [i.strip() for i in qs_in_d['addr']]
 
     if parse.path == '/admin/proxy/add':
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
         for new_proxy_sever in addr:
-            if new_proxy_sever in my_proxy_list:
-                pass
-            else:
-                my_proxy_list[new_proxy_sever] = {}
-                req.log_message('Added %s into proxy list' % new_proxy_sever)
+            if new_proxy_sever not in my_proxy_list:
+                my_proxy_list[new_proxy_sever] = {
+                    '_status': ProxyNodeStatus.UP_AND_RUNNING,
+                }
+                req.log_message('Appended %s into proxy list' % new_proxy_sever)
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
@@ -161,11 +160,14 @@ def admin(req):
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
         for proxy_sever in addr:
-            try:
-                my_proxy_list.pop(proxy_sever)
-            except KeyError:
-                pass
-            req.log_message('Delete %s from proxy list' % proxy_sever)
+            if proxy_sever not in my_proxy_list:
+                continue
+
+            if my_proxy_list[proxy_sever]['_status'] >= ProxyNodeStatus.UP_AND_RUNNING:
+                my_proxy_list[proxy_sever]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
+                req.log_message('Switch proxy node %s status to %d' %
+                                proxy_sever,
+                                ProxyNodeStatus.DELETED_OR_LOCKED)
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
@@ -228,14 +230,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.lock.acquire()
-        self.server.stat_info['requests'] += 1
+        self.server.server_stat['requests'] += 1
         self.server.lock.release()
 
         parses = urlparse.urlparse(self.path)
         if parses.scheme and parses.netloc:
 
             self.server.lock.acquire()
-            self.server.stat_info['waiting_requests'] += 1
+            self.server.server_stat['waiting_requests'] += 1
             self.server.lock.release()
 
             if self.server.args.proxy_auth:
@@ -255,7 +257,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     self._do_proxy()
 
             self.server.lock.acquire()
-            self.server.stat_info['waiting_requests'] -= 1
+            self.server.server_stat['waiting_requests'] -= 1
             self.server.lock.release()
 
         else:
@@ -362,7 +364,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
 
             self.server.lock.acquire()
-            self.server.stat_info['proxy_requests'] += 1
+            self.server.server_stat['proxy_requests'] += 1
             self.server.lock.release()
 
         except requests.exceptions.Timeout:
@@ -448,7 +450,7 @@ class POPServer(BaseHTTPServer.HTTPServer):
 
     lock = None
     proxy_list = None
-    stat_info = None
+    server_stat = None
 
 
 def check_proxy_list(httpd_inst):
@@ -457,6 +459,9 @@ def check_proxy_list(httpd_inst):
         proxy_auth = requests.auth.HTTPBasicAuth(splits[0], splits[1])
     else:
         proxy_auth = None
+
+    # _status > 0 means up and running
+    TIMES_DOWN = 1
 
     try:
         logger.info('%s started' % multiprocessing.current_process().name)
@@ -467,7 +472,6 @@ def check_proxy_list(httpd_inst):
             httpd_inst.lock.acquire()
 
             my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
-            new_proxy_list = {}
 
             for proxy_server_addr in my_proxy_list.keys():
                 proxies = {'http': 'http://' + proxy_server_addr}
@@ -477,18 +481,25 @@ def check_proxy_list(httpd_inst):
                                      proxies=proxies,
                                      timeout=PROXY_SERVER_KICK_SLOW_THAN_IN_SECONDS,
                                      auth=proxy_auth)
-
                     if r.status_code == httplib.OK and r.content.find('http://www.baidu.com/') != -1:
-                        new_proxy_list[proxy_server_addr] = my_proxy_list[proxy_server_addr]
+                        my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.UP_AND_RUNNING
+                    else:
+                        my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
+
                 except requests.exceptions.Timeout:
+                    my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
                     logger.debug('Test %s timeout, kick it from proxy list' % proxy_server_addr)
+
                 except requests.exceptions.ConnectionError:
+                    my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
                     logger.debug('Test %s connection error, kick it from proxy list' % proxy_server_addr)
+
                 except socket.timeout:
+                    my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
                     logger.debug('Test %s socket timeout, kick it from proxy list' % proxy_server_addr)
 
             httpd_inst.proxy_list.clear()
-            httpd_inst.proxy_list.update(new_proxy_list)
+            httpd_inst.proxy_list.update(my_proxy_list)
 
             httpd_inst.lock.release()
 
@@ -520,7 +531,7 @@ def main(args):
             }
     }
     """
-    httpd_inst.stat_info = mp_manager.dict({
+    httpd_inst.server_stat = mp_manager.dict({
         'waiting_requests': 0,
         'proxy_requests': 0,
         'requests': 0,
@@ -535,7 +546,7 @@ def main(args):
         srv_name = "HTTP proxy"
     logger.info("Serving %s on %s port %s ..."  % (srv_name, sa[0], sa[1]))
 
-    for i in range((multiprocessing.cpu_count() * 2)):
+    for i in range(multiprocessing.cpu_count()):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
         if args.daemon:
             p.daemon = args.daemon
