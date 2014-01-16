@@ -25,13 +25,6 @@ import requests.exceptions
 __version__ = "201401"
 
 
-PROXY_SERVER_PER_DOMAIN_MAX_CONCURRENCY = 1
-PROXY_SERVER_SEND_TIMEOUT_IN_SECONDS = 5.0
-LOGGING_USES_PROCESS_NAME_PREFIX = False
-PROXY_SERVER_CHECK_INTERVAL_IN_SECONDS = 30.0
-PROXY_SERVER_KICK_SLOW_THAN_IN_SECONDS = 5.0
-
-
 
 logging.basicConfig(format='%(asctime)s [%(levelname)s] [%(process)d] %(message)s',
                     datefmt='%Y-%m-%d %I:%M:%S',
@@ -41,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 class ProxyNodeStatus(object):
 
-    DELETED_OR_LOCKED = 0
+    DELETED_OR_DOWN = 0
     UP_AND_RUNNING = 1
 
 
@@ -49,9 +42,12 @@ def www_auth_required(func):
     @functools.wraps(func)
     def _wrapped_view(req):
         value = req.headers.getheader('authorization')
+        if not req.server.auth:
+            return func(req)
+
         if value:
             basic_credentials = value.replace('Basic ', '').strip()
-            if basic_credentials == req.server.args.auth_base64:
+            if basic_credentials == req.server.auth_base64:
                 return func(req)
 
         message, explain = req.responses[httplib.UNAUTHORIZED]
@@ -66,6 +62,19 @@ def www_auth_required(func):
             req.wfile.write(entry_body)
         return
     return _wrapped_view
+
+def local_net_required(func):
+    @functools.wraps(func)
+    def _wrapped_view(req):
+        ALLOW_HOSTS = ('127.0.0.1', 'localhost')
+
+        if req.server.server_name in ALLOW_HOSTS:
+            return func(req)
+        else:
+            req.send_error(code=httplib.FORBIDDEN, message='allow local net only')
+            return
+    return _wrapped_view
+
 
 
 def default_body(req):
@@ -88,52 +97,40 @@ def stat(req):
     req.send_header('Content-Type', 'application/json')
     req.end_headers()
 
-    server_info_d = {
-        'service_mode': req.server.args.mode,
-        'cpu_count': multiprocessing.cpu_count(),
-    }
 
-    server_stat_d = {}
-    for k in req.server.server_stat.keys():
-        server_stat_d[k] = req.server.server_stat[k]
+    req.server.lock.acquire()
+    proxy_list_d = copy.deepcopy(req.server.proxy_list)
+    req.server.lock.release()
 
-    proxy_list_d = {}
     total_up_nodes = 0
-    for proxy_server_addr in req.server.proxy_list.keys():
-        domain_name_map = req.server.proxy_list[proxy_server_addr]
+    for proxy_node_addr in proxy_list_d.keys():
+        if proxy_list_d[proxy_node_addr]['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
+            total_up_nodes += 1
 
-        proxy_list_d[proxy_server_addr] = {}
-
-        for domain_name in domain_name_map.keys():
-            item = {
-                domain_name: domain_name_map[domain_name]
-            }
-            proxy_list_d[proxy_server_addr].update(item)
-
-        total_up_nodes += domain_name_map['_status']
+    server_stat_d = copy.deepcopy(req.server.server_stat)
+    server_stat_d['total_up_nodes'] = total_up_nodes
 
     server_stat_d['total_nodes'] = len(proxy_list_d.keys())
-    server_stat_d['total_up_nodes'] = total_up_nodes
+
+
+    server_info_d = copy.deepcopy(req.server.server_info)
+
 
     migrated = {
         'server_info': server_info_d,
         'server_stat': server_stat_d,
         'proxy_list': proxy_list_d,
     }
+    print 'migrated', migrated
     entry_body = json.dumps(migrated, indent=2) + "\n"
 
     if req.command != 'HEAD':
         req.wfile.write(entry_body)
 
 
+@local_net_required
 @www_auth_required
 def admin(req):
-    ALLOW_HOSTS = ('127.0.0.1', 'localhost')
-
-    if req.server.server_name not in ALLOW_HOSTS:
-        req.send_error(httplib.FORBIDDEN)
-        return
-
     parse = urlparse.urlparse(req.path)
     qs_in_d = urlparse.parse_qs(parse.query)
     addr = [i.strip() for i in qs_in_d['addr']]
@@ -141,12 +138,13 @@ def admin(req):
     if parse.path == '/admin/proxy/add':
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
+
         for new_proxy_sever in addr:
             if new_proxy_sever not in my_proxy_list:
                 my_proxy_list[new_proxy_sever] = {
                     '_status': ProxyNodeStatus.UP_AND_RUNNING,
                 }
-                req.log_message('Appended %s into proxy list' % new_proxy_sever)
+            req.log_message('Appended %s into proxy list' % new_proxy_sever)
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
@@ -159,15 +157,17 @@ def admin(req):
     elif parse.path == '/admin/proxy/delete':
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
+
         for proxy_sever in addr:
             if proxy_sever not in my_proxy_list:
                 continue
 
-            if my_proxy_list[proxy_sever]['_status'] >= ProxyNodeStatus.UP_AND_RUNNING:
-                my_proxy_list[proxy_sever]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
-                req.log_message('Switch proxy node %s status to %d' %
+            if my_proxy_list[proxy_sever]['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
+                my_proxy_list[proxy_sever]['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
+
+            req.log_message('Switch proxy node %s status to %d' %
                                 proxy_sever,
-                                ProxyNodeStatus.DELETED_OR_LOCKED)
+                                ProxyNodeStatus.DELETED_OR_DOWN)
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
@@ -240,9 +240,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.server.server_stat['waiting_requests'] += 1
             self.server.lock.release()
 
-            if self.server.args.proxy_auth:
+            if self.server.proxy_auth:
                 if self._do_proxy_auth():
-                    if self.server.args.mode == 'slot_proxy':
+                    if self.server.server_info['service_mode'] == 'slot_proxy':
                         self._do_slot_proxy()
                     else:
                         self._do_proxy()
@@ -251,7 +251,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
                     self.end_headers()
             else:
-                if self.server.args.mode == 'slot_proxy':
+                if self.server.server_info['service_mode'] == 'slot_proxy':
                     self._do_slot_proxy()
                 else:
                     self._do_proxy()
@@ -276,39 +276,41 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
 
     def _proxy_server_incr_concurrency(self, top_domain_name, step=1):
-        free_proxy_server_addr = None
+        free_proxy_node_addr = None
 
         self.server.lock.acquire()
 
         # NOTICE: We have to do deepcopy and modify it, then re-assign it back,
         # see this for more detail http://docs.python.org/2/library/multiprocessing.html#multiprocessing.managers.SyncManager.list
         my_proxy_list = copy.deepcopy(self.server.proxy_list)
+
         try:
-            for proxy_server_addr in my_proxy_list.keys():
-                domain_name_map = my_proxy_list[proxy_server_addr]
+            for proxy_node_addr in my_proxy_list.keys():
+                domain_name_map = my_proxy_list[proxy_node_addr]
                 concurrency = domain_name_map.get(top_domain_name, 0)
                 # this proxy allow to crawl records from this domain name in concurrency mode
                 if step > 0:
-                    if concurrency < PROXY_SERVER_PER_DOMAIN_MAX_CONCURRENCY:
+                    if concurrency < self.server.server_settings['NODE_PER_DOMAIN_MAX_CONCURRENCY']:
                         if top_domain_name in domain_name_map:
-                            my_proxy_list[proxy_server_addr][top_domain_name] += step
+                            my_proxy_list[proxy_node_addr][top_domain_name] += step
                         else:
-                            my_proxy_list[proxy_server_addr] = {top_domain_name: 1}
-                        free_proxy_server_addr = proxy_server_addr
+                            my_proxy_list[proxy_node_addr].update({top_domain_name: 1})
+                        free_proxy_node_addr = proxy_node_addr
                         break
                 else:
                     if top_domain_name in domain_name_map:
-                        my_proxy_list[proxy_server_addr][top_domain_name] += step
-                        if my_proxy_list[proxy_server_addr][top_domain_name] < 0:
-                            my_proxy_list[proxy_server_addr][top_domain_name] = 0
+                        my_proxy_list[proxy_node_addr][top_domain_name] += step
+                        if my_proxy_list[proxy_node_addr][top_domain_name] < 0:
+                            my_proxy_list[proxy_node_addr][top_domain_name] = 0
                     else:
-                        my_proxy_list[proxy_server_addr] = {top_domain_name: 0}
+                        my_proxy_list[proxy_node_addr].update({top_domain_name: 0})
+
             self.server.proxy_list.clear()
             self.server.proxy_list.update(my_proxy_list)
         finally:
             self.server.lock.release()
 
-        return free_proxy_server_addr
+        return free_proxy_node_addr
 
     def _do_proxy_req(self, proxies=None, proxy_auth=None):
         url = self.path
@@ -322,7 +324,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             r = getattr(requests, self.command.lower())(
                 url=url,
                 proxies=proxies,
-                timeout=PROXY_SERVER_SEND_TIMEOUT_IN_SECONDS,
+                timeout=self.server.server_settings['NODE_SEND_TIMEOUT_IN_SECONDS'],
                 auth=auth)
             entry_body = r.content
             status_code = r.status_code
@@ -397,22 +399,22 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         parse = urlparse.urlparse(url)
         top_domain_name = get_top_domain_name(parse.netloc)
 
-        free_proxy_server_addr = None
-        while not free_proxy_server_addr:
-            free_proxy_server_addr = self._proxy_server_incr_concurrency(top_domain_name, step=1)
+        free_proxy_node_addr = None
+        while not free_proxy_node_addr:
+            free_proxy_node_addr = self._proxy_server_incr_concurrency(top_domain_name, step=1)
 
-            # if not free_proxy_server_addr:
+            # if not free_proxy_node_addr:
             #     try:
             #         time.sleep(random.random() * PROXY_SERVER_SEND_TIMEOUT)
             #     except KeyboardInterrupt:
             #         pass
 
-            if not free_proxy_server_addr:
+            if not free_proxy_node_addr:
                 self.send_response(httplib.SERVICE_UNAVAILABLE)
                 self.end_headers()
                 return
 
-        proxies = {"http" : "http://" + free_proxy_server_addr}
+        proxies = {"http" : "http://" + free_proxy_node_addr}
 
         value = self.headers.getheader('authorization')
         if value:
@@ -427,10 +429,72 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     def _do_proxy_auth(self):
         value = self.headers.getheader('authorization')
         if value:
-            if value.replace('Basic ', '').strip() == self.server.args.proxy_auth_base64:
+            if value.replace('Basic ', '').strip() == self.server.proxy_auth_base64:
                 return True
         return False
 
+
+def check_proxy_list(httpd_inst):
+    try:
+        logger.info('%s started' % multiprocessing.current_process().name)
+
+        while True:
+            time.sleep(httpd_inst.server_settings['NODE_CHECK_INTERVAL'])
+
+            # TODO: improve update process
+            httpd_inst.lock.acquire()
+            my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
+            httpd_inst.lock.release()
+
+            down_nodes = set()
+
+            for proxy_node_addr in my_proxy_list.keys():
+                proxies = {'http': 'http://' + proxy_node_addr}
+
+                try:
+                    r = requests.get(url='http://baidu.com/',
+                                     proxies=proxies,
+                                     timeout=httpd_inst.server.server_settings['NODE_KICK_SLOW_THAN'],
+                                     auth=httpd_inst.proxy_auth)
+                    if r.status_code != httplib.OK or r.content.find('http://www.baidu.com/') == -1:
+                        down_nodes.add(proxy_node_addr)
+
+                except requests.exceptions.Timeout:
+                    down_nodes.add(proxy_node_addr)
+                    logger.debug('Test %s timeout, kick it from proxy list' % proxy_node_addr)
+
+                except requests.exceptions.ConnectionError:
+                    down_nodes.add(proxy_node_addr)
+                    logger.debug('Test %s connection error, kick it from proxy list' % proxy_node_addr)
+
+                except socket.timeout:
+                    down_nodes.add(proxy_node_addr)
+                    logger.debug('Test %s socket timeout, kick it from proxy list' % proxy_node_addr)
+
+
+            httpd_inst.lock.acquire()
+            my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
+
+            for proxy_node_addr in my_proxy_list.keys():
+                if proxy_node_addr in down_nodes:
+                    my_proxy_list[proxy_node_addr]['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
+                else:
+                    my_proxy_list[proxy_node_addr]['_status'] = ProxyNodeStatus.UP_AND_RUNNING
+
+            httpd_inst.proxy_list.clear()
+            httpd_inst.proxy_list.update(my_proxy_list)
+            httpd_inst.lock.release()
+
+            time.sleep(httpd_inst.server_settings['NODE_CHECK_INTERVAL'])
+
+    except KeyboardInterrupt:
+        pass
+
+    except IOError:
+        pass
+
+    finally:
+        httpd_inst.server_close()
 
 
 def serve_forever(httpd_inst):
@@ -451,100 +515,60 @@ class POPServer(BaseHTTPServer.HTTPServer):
     lock = None
     proxy_list = None
     server_stat = None
+    server_info = None
+    server_settings = None
 
-
-def check_proxy_list(httpd_inst):
-    if httpd_inst.args.proxy_auth:
-        splits = httpd_inst.args.proxy_auth.split(':')
-        proxy_auth = requests.auth.HTTPBasicAuth(splits[0], splits[1])
-    else:
-        proxy_auth = None
-
-    # _status > 0 means up and running
-    TIMES_DOWN = 1
-
-    try:
-        logger.info('%s started' % multiprocessing.current_process().name)
-
-        while True:
-            time.sleep(PROXY_SERVER_CHECK_INTERVAL_IN_SECONDS)
-
-            httpd_inst.lock.acquire()
-
-            my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
-
-            for proxy_server_addr in my_proxy_list.keys():
-                proxies = {'http': 'http://' + proxy_server_addr}
-
-                try:
-                    r = requests.get(url='http://baidu.com/',
-                                     proxies=proxies,
-                                     timeout=PROXY_SERVER_KICK_SLOW_THAN_IN_SECONDS,
-                                     auth=proxy_auth)
-                    if r.status_code == httplib.OK and r.content.find('http://www.baidu.com/') != -1:
-                        my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.UP_AND_RUNNING
-                    else:
-                        my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
-
-                except requests.exceptions.Timeout:
-                    my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
-                    logger.debug('Test %s timeout, kick it from proxy list' % proxy_server_addr)
-
-                except requests.exceptions.ConnectionError:
-                    my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
-                    logger.debug('Test %s connection error, kick it from proxy list' % proxy_server_addr)
-
-                except socket.timeout:
-                    my_proxy_list[proxy_server_addr]['_status'] = ProxyNodeStatus.DELETED_OR_LOCKED
-                    logger.debug('Test %s socket timeout, kick it from proxy list' % proxy_server_addr)
-
-            httpd_inst.proxy_list.clear()
-            httpd_inst.proxy_list.update(my_proxy_list)
-
-            httpd_inst.lock.release()
-
-    except KeyboardInterrupt:
-        pass
-
-    except IOError:
-        pass
-
-    finally:
-        httpd_inst.server_close()
+    proxy_auth = None
+    auth = None
+    proxy_auth_base64 = None
+    auth_base64 = None
 
 
 def main(args):
     server_address = (args.addr, args.port)
     httpd_inst = POPServer(server_address, HandlerClass)
-    httpd_inst.args = args
+
+    pid = os.getpid()
+
+
+    if args.auth:
+        httpd_inst.auth = args.auth
+        httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
+    if args.proxy_auth:
+        httpd_inst.proxy_auth = args.proxy_auth
+        httpd_inst.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
+
 
     mp_manager = multiprocessing.Manager()
-    httpd_inst.mp_manager = mp_manager
+    httpd_inst.mp_manager = mp_manager    
     httpd_inst.lock = multiprocessing.Lock()
+    
     httpd_inst.proxy_list = mp_manager.dict()
-    """
-    proxy_list = {
-        'proxy_host:proxy_port': {
-                'domain_name1': count,
-                'domain_name2': count,
-                # ...
-            }
-    }
-    """
+    
     httpd_inst.server_stat = mp_manager.dict({
         'waiting_requests': 0,
         'proxy_requests': 0,
         'requests': 0,
-        'total_nodes': 0,
     })
 
-    sa = httpd_inst.socket.getsockname()
-    logger.info('POPS started pid %d' % os.getpid())
-    if args.mode == "slot_proxy":
-        srv_name = "HTTP slot proxy"
-    else:
-        srv_name = "HTTP proxy"
-    logger.info("Serving %s on %s port %s ..."  % (srv_name, sa[0], sa[1]))
+    # READ-ONLY info
+    httpd_inst.server_info = mp_manager.dict({
+        'service_mode': args.mode,
+        'cpu_count': multiprocessing.cpu_count(),
+        'serving_on': "%s:%d" % (server_address[0], server_address[1]),
+        # 'pid': pid,
+        # 'error_log': args.error_log,
+    })
+
+
+    srv_settings = dict(
+        NODE_PER_DOMAIN_MAX_CONCURRENCY = 1,
+        NODE_SEND_TIMEOUT_IN_SECONDS = 15.0,
+        NODE_CHECK_INTERVAL = 60.0,
+        NODE_KICK_SLOW_THAN = 5.0,
+    )
+    httpd_inst.server_settings = mp_manager.dict(srv_settings)
+
 
     for i in range(multiprocessing.cpu_count()):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
@@ -552,11 +576,20 @@ def main(args):
             p.daemon = args.daemon
         p.start()
 
-    if args.mode == 'slot_proxy':
+    if httpd_inst.server_info['service_mode'] == 'slot_proxy':
         p = multiprocessing.Process(target=check_proxy_list, name='CheckProxyListProcess', args=(httpd_inst,))
         if args.daemon:
             p.daemon = args.daemon
         p.start()
+
+
+    logger.info('POPS started pid %d' % pid)
+    if httpd_inst.server_info['service_mode'] == "slot_proxy":
+        srv_name = "HTTP slot proxy server"
+    else:
+        srv_name = "HTTP proxy node"
+    logger.info("Serving %s on %s port %s ..."  % (srv_name, server_address[0], server_address[1]))
+
 
     serve_forever(httpd_inst)
 
@@ -627,11 +660,6 @@ if __name__ == "__main__":
                         help='default start')
 
     args = parser.parse_args()
-
-    if args.auth:
-        args.auth_base64 = base64.encodestring(args.auth).strip()
-    if args.proxy_auth:
-        args.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
 
     if args.daemon or args.stop:
         if args.stop:

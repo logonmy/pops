@@ -8,7 +8,6 @@
       "_status": 1,
       // 1 means up and running,
       // 0 means deleted or locked and client should not uses it,
-      //  -2 means there are two times is down in available testing
 
       "foo.com": 1,
       "bar.com": 0
