@@ -115,10 +115,13 @@ def stat(req):
 
     server_info_d = copy.deepcopy(req.server.server_info)
 
+    server_settings_d = copy.deepcopy(req.server.server_settings)
+
 
     migrated = {
         'server_info': server_info_d,
         'server_stat': server_stat_d,
+        'server_settings': server_settings_d,
         'proxy_list': proxy_list_d,
     }
     entry_body = json.dumps(migrated, indent=2) + "\n"
@@ -132,9 +135,10 @@ def stat(req):
 def admin(req):
     parse = urlparse.urlparse(req.path)
     qs_in_d = urlparse.parse_qs(parse.query)
-    addr = [i.strip() for i in qs_in_d['addr']]
 
     if parse.path == '/admin/proxy/add':
+        addr = [i.strip() for i in qs_in_d['addr']]
+
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
 
@@ -154,6 +158,8 @@ def admin(req):
 
 
     elif parse.path == '/admin/proxy/delete':
+        addr = [i.strip() for i in qs_in_d['addr']]
+
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
 
@@ -170,6 +176,17 @@ def admin(req):
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
+        req.server.lock.release()
+
+        req.send_response(httplib.OK)
+        return
+
+    elif parse.path == '/admin/server_settings/update':
+        k, v = qs_in_d['k'][0], qs_in_d['v'][0]
+
+        req.server.lock.acquire()
+        if k in req.server.server_settings:
+            req.server.server_settings[k] = v
         req.server.lock.release()
 
         req.send_response(httplib.OK)
@@ -289,7 +306,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 concurrency = domain_name_map.get(top_domain_name, 0)
                 # this proxy allow to crawl records from this domain name in concurrency mode
                 if step > 0:
-                    if concurrency < self.server.server_settings['NODE_PER_DOMAIN_MAX_CONCURRENCY']:
+                    if concurrency < int(self.server.server_settings['node_per_domain_max_concurrency']):
                         if top_domain_name in domain_name_map:
                             my_proxy_list[proxy_node_addr][top_domain_name] += step
                         else:
@@ -323,7 +340,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             r = getattr(requests, self.command.lower())(
                 url=url,
                 proxies=proxies,
-                timeout=self.server.server_settings['NODE_SEND_TIMEOUT_IN_SECONDS'],
+                timeout=float(self.server.server_settings['node_send_timeout_in_seconds']),
                 auth=auth)
             entry_body = r.content
             status_code = r.status_code
@@ -438,8 +455,6 @@ def check_proxy_list(httpd_inst):
         logger.info('%s started' % multiprocessing.current_process().name)
 
         while True:
-            time.sleep(httpd_inst.server_settings['NODE_CHECK_INTERVAL'])
-
             # TODO: improve update process
             httpd_inst.lock.acquire()
             my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
@@ -453,7 +468,7 @@ def check_proxy_list(httpd_inst):
                 try:
                     r = requests.get(url='http://baidu.com/',
                                      proxies=proxies,
-                                     timeout=httpd_inst.server_settings['NODE_KICK_SLOW_THAN'],
+                                     timeout=float(httpd_inst.server_settings['node_kick_slow_than']),
                                      auth=httpd_inst.proxy_auth)
                     if r.status_code != httplib.OK or r.content.find('http://www.baidu.com/') == -1:
                         down_nodes.add(proxy_node_addr)
@@ -484,7 +499,7 @@ def check_proxy_list(httpd_inst):
             httpd_inst.proxy_list.update(my_proxy_list)
             httpd_inst.lock.release()
 
-            time.sleep(httpd_inst.server_settings['NODE_CHECK_INTERVAL'])
+            time.sleep(float(httpd_inst.server_settings['node_check_interval']))
 
     except KeyboardInterrupt:
         pass
@@ -531,10 +546,12 @@ def main(args):
 
 
     if args.auth:
-        httpd_inst.auth = args.auth
+        splits = args.auth.split(':')
+        httpd_inst.auth = requests.auth.HTTPBasicAuth(*splits)
         httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
     if args.proxy_auth:
-        httpd_inst.proxy_auth = args.proxy_auth
+        splits = args.proxy_auth.split(':')
+        httpd_inst.proxy_auth = requests.auth.HTTPBasicAuth(*splits)
         httpd_inst.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
 
 
@@ -561,10 +578,10 @@ def main(args):
 
 
     srv_settings = dict(
-        NODE_PER_DOMAIN_MAX_CONCURRENCY = 1,
-        NODE_SEND_TIMEOUT_IN_SECONDS = 15.0,
-        NODE_CHECK_INTERVAL = 60.0,
-        NODE_KICK_SLOW_THAN = 5.0,
+        node_per_domain_max_concurrency = 1,
+        node_send_timeout_in_seconds = 15.0,
+        node_check_interval = 60.0,
+        node_kick_slow_than = 5.0,
     )
     httpd_inst.server_settings = mp_manager.dict(srv_settings)
 
