@@ -121,7 +121,6 @@ def stat(req):
         'server_stat': server_stat_d,
         'proxy_list': proxy_list_d,
     }
-    print 'migrated', migrated
     entry_body = json.dumps(migrated, indent=2) + "\n"
 
     if req.command != 'HEAD':
@@ -454,7 +453,7 @@ def check_proxy_list(httpd_inst):
                 try:
                     r = requests.get(url='http://baidu.com/',
                                      proxies=proxies,
-                                     timeout=httpd_inst.server.server_settings['NODE_KICK_SLOW_THAN'],
+                                     timeout=httpd_inst.server_settings['NODE_KICK_SLOW_THAN'],
                                      auth=httpd_inst.proxy_auth)
                     if r.status_code != httplib.OK or r.content.find('http://www.baidu.com/') == -1:
                         down_nodes.add(proxy_node_addr)
@@ -556,8 +555,8 @@ def main(args):
         'service_mode': args.mode,
         'cpu_count': multiprocessing.cpu_count(),
         'serving_on': "%s:%d" % (server_address[0], server_address[1]),
-        # 'pid': pid,
-        # 'error_log': args.error_log,
+        'pid': pid,
+        'error_log': args.error_log.name,
     })
 
 
