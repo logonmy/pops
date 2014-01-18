@@ -543,7 +543,11 @@ def main(args):
     httpd_inst = POPServer(server_address, HandlerClass)
 
     pid = os.getpid()
-
+    processes = int(args.processes)
+    if hasattr(args.error_log, 'name'):
+        error_log_path = getattr(args.error_log, 'name')
+    else:
+        error_log_path = args.error_log
 
     if args.auth:
         splits = args.auth.split(':')
@@ -571,9 +575,10 @@ def main(args):
     httpd_inst.server_info = mp_manager.dict({
         'service_mode': args.mode,
         'cpu_count': multiprocessing.cpu_count(),
+        'processes': processes,
         'serving_on': "%s:%d" % (server_address[0], server_address[1]),
         'pid': pid,
-        'error_log': args.error_log.name,
+        'error_log': error_log_path,
     })
 
 
@@ -585,8 +590,7 @@ def main(args):
     )
     httpd_inst.server_settings = mp_manager.dict(srv_settings)
 
-
-    for i in range(multiprocessing.cpu_count()):
+    for i in range(processes):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
         if args.daemon:
             p.daemon = args.daemon
@@ -662,6 +666,10 @@ if __name__ == "__main__":
                         choices=['slot_proxy', 'proxy'],
                         default='proxy',
                         help='default proxy')
+
+    parser.add_argument('--processes',
+                        default=multiprocessing.cpu_count(),
+                        help='default cat /proc/cpuinfo | grep processor | wc -l')
 
     parser.add_argument('--error_log',
                         default=sys.stderr,
