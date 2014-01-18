@@ -5,6 +5,7 @@ import copy
 import functools
 import logging
 import re
+import threading
 import time
 import json
 import os
@@ -450,53 +451,90 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         return False
 
 
+def test_http_proxy(lock, down_node_list, proxy_node_addr, proxy_auth, timeout):
+    proxies = {'http': 'http://' + proxy_node_addr}
+
+    try:
+        r = requests.get(url='http://baidu.com/',
+                         proxies=proxies,
+                         timeout=timeout,
+                         auth=proxy_auth)
+        if r.status_code == httplib.OK or r.content.find('http://www.baidu.com/') != -1:
+            return True
+
+    except requests.exceptions.Timeout:
+        lock.acquire()
+        down_node_list[proxy_node_addr] = 'requests.exceptions.Timeout'
+        lock.release()
+        return False
+
+    except requests.exceptions.ConnectionError:
+        lock.acquire()
+        down_node_list[proxy_node_addr] = 'requests.exceptions.ConnectionError'
+        lock.release()
+        return False
+
+    except socket.timeout:
+        lock.acquire()
+        down_node_list[proxy_node_addr] = 'socket.Timeout'
+        lock.release()
+        return False
+
+    lock.acquire()
+    down_node_list[proxy_node_addr] = 'unknown'
+    lock.release()
+
+    return False
+
+
 def check_proxy_list(httpd_inst):
+    thread_lock = threading.Lock()
+
     try:
         logger.info('%s started' % multiprocessing.current_process().name)
 
         while True:
-            # TODO: improve update process
             httpd_inst.lock.acquire()
             my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
             httpd_inst.lock.release()
 
-            down_nodes = set()
 
-            for proxy_node_addr in my_proxy_list.keys():
-                proxies = {'http': 'http://' + proxy_node_addr}
+            down_node_list = {}
+            node_test_max_concurrency = int(httpd_inst.server_settings['node_test_max_concurrency'])
 
-                try:
-                    r = requests.get(url='http://baidu.com/',
-                                     proxies=proxies,
-                                     timeout=float(httpd_inst.server_settings['node_kick_slow_than']),
-                                     auth=httpd_inst.proxy_auth)
-                    if r.status_code != httplib.OK or r.content.find('http://www.baidu.com/') == -1:
-                        down_nodes.add(proxy_node_addr)
+            time_s = time.time()
+            logger.debug('Test proxy nodes started, node_test_max_concurrency = %d' % node_test_max_concurrency)
 
-                except requests.exceptions.Timeout:
-                    down_nodes.add(proxy_node_addr)
-                    logger.debug('Test %s timeout, kick it from proxy list' % proxy_node_addr)
+            for range_start in range(0, len(my_proxy_list), node_test_max_concurrency):
+                proxy_node_parts = list(my_proxy_list)[range_start:range_start + int(node_test_max_concurrency)]
 
-                except requests.exceptions.ConnectionError:
-                    down_nodes.add(proxy_node_addr)
-                    logger.debug('Test %s connection error, kick it from proxy list' % proxy_node_addr)
+                thread_list = []
+                for idx in range(len(proxy_node_parts)):
+                    kwargs = dict(lock=thread_lock,
+                                  down_node_list=down_node_list,
+                                  proxy_node_addr=proxy_node_parts[idx],
+                                  proxy_auth=httpd_inst.proxy_auth,
+                                  timeout=float(httpd_inst.server_settings['node_kick_slow_than']))
+                    t = threading.Thread(target=test_http_proxy, kwargs=kwargs)
+                    thread_list.append(t)
+                [t.start() for t in thread_list]
+                [t.join() for t in thread_list]
 
-                except socket.timeout:
-                    down_nodes.add(proxy_node_addr)
-                    logger.debug('Test %s socket timeout, kick it from proxy list' % proxy_node_addr)
-
+            time_e = time.time()
+            logger.debug('Test proxy nodes finished, total nodes %d in %f seconds' % (len(my_proxy_list), time_e - time_s))
 
             httpd_inst.lock.acquire()
-            my_proxy_list = copy.deepcopy(httpd_inst.proxy_list)
 
             for proxy_node_addr in my_proxy_list.keys():
-                if proxy_node_addr in down_nodes:
+                if proxy_node_addr in down_node_list:
                     my_proxy_list[proxy_node_addr]['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
+                    logger.debug('Test %s got %s, kick it from proxy list' % (proxy_node_addr, down_node_list[proxy_node_addr]))
                 else:
                     my_proxy_list[proxy_node_addr]['_status'] = ProxyNodeStatus.UP_AND_RUNNING
 
             httpd_inst.proxy_list.clear()
             httpd_inst.proxy_list.update(my_proxy_list)
+
             httpd_inst.lock.release()
 
             time.sleep(float(httpd_inst.server_settings['node_check_interval']))
@@ -587,6 +625,7 @@ def main(args):
         node_send_timeout_in_seconds = 15.0,
         node_check_interval = 60.0,
         node_kick_slow_than = 5.0,
+        node_test_max_concurrency = 20,
     )
     httpd_inst.server_settings = mp_manager.dict(srv_settings)
 
