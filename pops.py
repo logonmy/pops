@@ -658,9 +658,9 @@ class MyDaemon(object):
     def __init__(self, args):
         self.args = args
 
-        self.stdin_path = '/dev/null'
-        self.stdout_path = '/dev/stdout'
-        self.stderr_path = args.error_log
+        self.stdin_path = os.devnull
+        self.stdout_path = os.devnull
+        self.stderr_path = args.error_log or os.devnull
         self.pidfile_path = args.pid
         self.pidfile_timeout = 3
 
@@ -711,8 +711,7 @@ if __name__ == "__main__":
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
 
     parser.add_argument('--error_log',
-                        default=sys.stderr,
-                        help='default /dev/stderr')
+                        help='default /dev/null')
 
     parser.add_argument('--pid')
 
@@ -725,6 +724,10 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.daemon or args.stop:
+        if not args.pid:
+            sys.stderr.write("You must set `--pid /path/to/pid` for `--daemon`.\n")
+            sys.exit(1)
+
         if args.stop:
             action = 'stop'
         else:
