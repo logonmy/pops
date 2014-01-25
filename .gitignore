@@ -4,3 +4,7 @@ dist/
 *.egg-info
 *.log
 t.*
+*.pyc
+*.pyo
+*.txt
+*.pid
