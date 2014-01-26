@@ -445,7 +445,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self._proxy_server_incr_concurrency(top_domain_name, step=-1)
 
     def _do_proxy_auth(self):
-        value = self.headers.getheader('authorization')
+        value = self.headers.getheader('proxy-authorization')
         if value:
             if value.replace('Basic ', '').strip() == self.server.proxy_auth_base64:
                 return True
