@@ -334,7 +334,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         url = self.path
 
         if proxy_auth:
-            auth = requests.auth.HTTPBasicAuth(*proxy_auth)
+            auth = requests.auth.HTTPProxyAuth(*proxy_auth)
         else:
             auth = None
 
@@ -434,7 +434,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         proxies = {"http" : "http://" + free_proxy_node_addr}
 
-        value = self.headers.getheader('authorization')
+        value = self.headers.getheader('proxy-authorization')
         if value:
             proxy_auth =  base64.decodestring(value.replace('Basic ', '').strip()).split(':')
         else:
