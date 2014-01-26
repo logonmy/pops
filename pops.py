@@ -2,6 +2,7 @@
 import argparse
 import base64
 import copy
+import errno
 import functools
 import logging
 import re
@@ -479,6 +480,15 @@ def test_http_proxy(lock, down_node_list, proxy_node_addr, proxy_auth, timeout):
         down_node_list[proxy_node_addr] = 'socket.Timeout'
         lock.release()
         return False
+
+    except socket.error, ex:
+        if ex[0] == errno.ECONNRESET:
+
+            lock.acquire()
+            down_node_list[proxy_node_addr] = 'socket errno.ECONNRESET'
+            lock.release()
+
+            return False
 
     lock.acquire()
     down_node_list[proxy_node_addr] = 'unknown'
