@@ -603,7 +603,7 @@ def main(args):
         httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
     if args.proxy_auth:
         splits = args.proxy_auth.split(':')
-        httpd_inst.proxy_auth = requests.auth.HTTPBasicAuth(*splits)
+        httpd_inst.proxy_auth = requests.auth.HTTPProxyAuth(*splits)
         httpd_inst.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
 
 
@@ -635,7 +635,7 @@ def main(args):
         node_send_timeout_in_seconds = 15.0,
         node_check_interval = 60.0,
         node_kick_slow_than = 5.0,
-        node_test_max_concurrency = 20,
+        node_test_max_concurrency = 50,
     )
     httpd_inst.server_settings = mp_manager.dict(srv_settings)
 
