@@ -8,3 +8,4 @@ t.*
 *.pyo
 *.txt
 *.pid
+scripts/delegated-apnic-latest
