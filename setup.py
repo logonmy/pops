@@ -9,7 +9,7 @@ setup(
     license='MIT License',
     author='Shuge Lee',
     author_email='shuge.lee@gmail.com',
-    description='Proxy of proxies server',
+    description='Proxy of HTTP proxy servers',
 
     platforms = ["Mac OS X", "Linux"],
 

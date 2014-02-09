@@ -580,10 +580,12 @@ class POPServer(BaseHTTPServer.HTTPServer):
     server_info = None
     server_settings = None
 
-    proxy_auth = None
     auth = None
-    proxy_auth_base64 = None
     auth_base64 = None
+
+    proxy_auth = None
+    proxy_auth_base64 = None
+
 
 
 def main(args):
@@ -654,7 +656,7 @@ def main(args):
 
     logger.info('POPS started pid %d' % pid)
     if httpd_inst.server_info['service_mode'] == "slot_proxy":
-        srv_name = "HTTP slot proxy server"
+        srv_name = "HTTP proxy slot server"
     else:
         srv_name = "HTTP proxy node"
     logger.info("Serving %s on %s port %s ..."  % (srv_name, server_address[0], server_address[1]))
