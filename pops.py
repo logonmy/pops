@@ -344,69 +344,71 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 proxies=proxies,
                 timeout=float(self.server.server_settings['node_send_timeout_in_seconds']),
                 auth=auth)
-            entry_body = r.content
-            status_code = r.status_code
-
-            # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
-            hop_by_hop_headers_drop = (
-                'TE',
-                'Transfer-Encoding',
-                'Keep-Alive',
-                'Proxy-Authorization',
-                'Proxy-Authentication',
-                'Trailer',
-                'Upgrade',
-            )
-
-            headers_filtered = {}
-            for k in r.headers.keys():
-                if k.lower() not in (i.lower() for i in hop_by_hop_headers_drop):
-                    headers_filtered[k] = r.headers[k]
-
-            # TODO: we should not modified header 'Content-Encoding',
-            # because IETF standard said you should not, see also
-            # http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-14#section-7.1.3.2
-            if len(entry_body):
-                if 'content-encoding' in headers_filtered:
-                    headers_filtered.pop('content-encoding')
-                headers_filtered['content-length'] = len(entry_body)
-
-
-            self.send_response(status_code)
-            for k in headers_filtered.keys():
-                self.send_header(k, headers_filtered[k])
-            self.end_headers()
-
-            if self.command != 'HEAD' and \
-                            status_code >= 200 and \
-                            status_code not in (204, 304):
-                self.wfile.write(entry_body)
-
-
-            self.server.lock.acquire()
-            self.server.server_stat['proxy_requests'] += 1
-            self.server.lock.release()
 
         except requests.exceptions.Timeout:
             self.log_error('Request %s timeout' % self.path)
 
             self.send_response(httplib.GATEWAY_TIMEOUT)
             self.end_headers()
+            return
 
         except requests.exceptions.ConnectionError:
             self.log_error('Request %s connection refused' % self.path)
 
             self.send_response(httplib.SERVICE_UNAVAILABLE)
             self.end_headers()
+            return
 
         except socket.timeout:
             self.log_error('Request %s timeout' % self.path)
 
             self.send_response(httplib.GATEWAY_TIMEOUT)
             self.end_headers()
+            return
 
-        finally:
-            pass
+
+        entry_body = r.content
+        status_code = r.status_code
+
+        # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
+        hop_by_hop_headers_drop = (
+            'TE',
+            'Transfer-Encoding',
+            'Keep-Alive',
+            'Proxy-Authorization',
+            'Proxy-Authentication',
+            'Trailer',
+            'Upgrade',
+        )
+
+        headers_filtered = {}
+        for k in r.headers.keys():
+            if k.lower() not in (i.lower() for i in hop_by_hop_headers_drop):
+                headers_filtered[k] = r.headers[k]
+
+        # TODO: we should not modified header 'Content-Encoding',
+        # because IETF standard said you should not, see also
+        # http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-14#section-7.1.3.2
+        if len(entry_body):
+            if 'content-encoding' in headers_filtered:
+                headers_filtered.pop('content-encoding')
+            headers_filtered['content-length'] = len(entry_body)
+
+
+        self.send_response(status_code)
+        for k in headers_filtered.keys():
+            self.send_header(k, headers_filtered[k])
+        self.end_headers()
+
+        if self.command != 'HEAD' and \
+                        status_code >= 200 and \
+                        status_code not in (204, 304):
+            self.wfile.write(entry_body)
+
+        self.server.lock.acquire()
+        self.server.server_stat['proxy_requests'] += 1
+        self.server.lock.release()
+
 
     def _do_proxy(self):
         self._do_proxy_req()
@@ -634,7 +636,7 @@ def main(args):
 
     srv_settings = dict(
         node_per_domain_max_concurrency = 1,
-        node_send_timeout_in_seconds = 15.0,
+        node_send_timeout_in_seconds = 30.0,
         node_check_interval = 60.0,
         node_kick_slow_than = 5.0,
         node_test_max_concurrency = 50,
