@@ -22,6 +22,7 @@ from daemon import runner
 import requests
 import requests.auth
 import requests.exceptions
+import select
 
 
 __version__ = "201401"
@@ -227,6 +228,34 @@ def get_top_domain_name(s):
         raise ValueError
 
 
+class HTTPResponse(httplib.HTTPResponse):
+    """ Extend httplib.HTTPResponse for auto read and save HTTP response body. """
+
+    def __init__(self,
+                 sock,
+                 debuglevel=0,
+                 strict=0,
+                 method=None,
+                 buffering=False,
+                 read_entry_body=True):
+        httplib.HTTPResponse.__init__(self,
+                                      sock=sock,
+                                      debuglevel=debuglevel,
+                                      strict=strict,
+                                      method=method,
+                                      buffering=buffering)
+
+        if read_entry_body:
+            self.begin()
+            self._entry_body = self.read()
+        else:
+            self._entry_body = None
+
+    @property
+    def entry_body(self):
+        return self._entry_body
+
+
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
     server_version = "POPS/" + __version__
@@ -292,6 +321,62 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
             self.send_error(httplib.NOT_FOUND)
 
+    def do_CONNECT(self):
+        host, port = self.path.split(':')
+        port = int(port)
+
+        sock_dst = socket.socket()
+
+        try:
+            sock_dst.connect((host, port))
+        except socket.error, ex:
+            err_no, err_msg = ex.args
+            if err_no == errno.ECONNREFUSED:
+                self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
+                return
+            else:
+                raise ex
+
+        self.send_response(httplib.OK, message='Connection established')
+        self.send_header('Proxy-Agent', self.server_version)
+        self.end_headers()
+
+        BUFF_SIZE = 4096
+        read_list = [self.connection, sock_dst]
+        sock_src_shutdown, sock_dst_shutdown = False, False
+        do_loop = True
+        while do_loop:
+            read_list = []
+            if not sock_dst_shutdown:
+                read_list.append(sock_dst)
+            if not sock_src_shutdown:
+                read_list.append(self.connection)
+            ready_rlist, ready_wlist, ready_elist = select.select(read_list, [], [])
+            for sock in ready_rlist:
+                if sock == self.connection:
+                    data = self.connection.recv(BUFF_SIZE)
+                    if data:
+                        sock_dst.sendall(data)
+                        # count = sock_dst.send(data)
+                        # total_bytes = len(data)
+                        # print 'received %d bytes from client, forward %d bytes to target, remain %d bytes' % (total_bytes, count, total_bytes - count)
+                    else:
+                        msg = 'client sent nothing, it seems has disconnected'
+                        logger.debug(msg)
+                        sock_src_shutdown = True
+                elif sock == sock_dst:
+                    data = sock_dst.recv(BUFF_SIZE)
+                    if data:
+                        self.connection.sendall(data)
+                        # total_bytes = len(data)
+                        # print 'received %d bytes from target, forward %d bytes to client, remain %d bytes' % (total_bytes, count, total_bytes - count)
+                        # self.connection.send(data)
+                    else:
+                        msg = 'target sent nothing, it seems has disconnected'
+                        logger.debug(msg)
+                        sock_dst_shutdown = True
+            if sock_src_shutdown and sock_dst_shutdown:
+                do_loop = False
 
     def _proxy_server_incr_concurrency(self, top_domain_name, step=1):
         free_proxy_node_addr = None
@@ -612,11 +697,11 @@ def main(args):
 
 
     mp_manager = multiprocessing.Manager()
-    httpd_inst.mp_manager = mp_manager    
+    httpd_inst.mp_manager = mp_manager
     httpd_inst.lock = multiprocessing.Lock()
-    
+
     httpd_inst.proxy_list = mp_manager.dict()
-    
+
     httpd_inst.server_stat = mp_manager.dict({
         'waiting_requests': 0,
         'proxy_requests': 0,
