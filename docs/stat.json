@@ -9,8 +9,8 @@
       // 1 means up and running,
       // 0 means deleted or locked and client should not uses it,
 
-      "foo.com": 1,
-      "bar.com": 0
+      "http://foo.com": 1,
+      "https://bar.com": 0
     },
     "172.10.10.100:1025": {}
   }, 
