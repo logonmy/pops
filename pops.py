@@ -141,6 +141,10 @@ def admin(req):
     parse = urlparse.urlparse(req.path)
     qs_in_d = urlparse.parse_qs(parse.query)
 
+    if req.server.server_info['service_mode'] != 'slot':
+        req.send_error(httplib.NOT_FOUND)
+        return
+
     if parse.path == '/admin/proxy/add':
         addr = [i.strip() for i in qs_in_d['addr']]
 
@@ -284,6 +288,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         parses = urlparse.urlparse(self.path)
         if parses.scheme and parses.netloc:
+            # # TODO: Should proxy forbidden access itself by itself?
+            # tar_addr, tar_port = parses.netloc.split(':')
+            # bind_addr, bind_port = self.server.server_settings['serving_on'].split(':')
+            # if tar_port == bind_port:
+            #     pass
 
             self.server.lock.acquire()
             self.server.server_stat['waiting_requests'] += 1
@@ -295,10 +304,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            if self.server.server_info['service_mode'] == 'slot_proxy':
-                self._do_others_slot_proxy_mode()
+            if self.server.server_info['service_mode'] == 'slot':
+                self._do_others_slot_mode()
             else:
-                self._do_others_proxy_mode()
+                self._do_others_node_mode()
 
             self.server.lock.acquire()
             self.server.server_stat['waiting_requests'] -= 1
@@ -332,8 +341,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
             self.end_headers()
         else:
-            if self.server.server_info['service_mode'] == 'slot_proxy':
-                self._do_CONNECT_slot_proxy_mode()
+            if self.server.server_info['service_mode'] == 'slot':
+                self._do_CONNECT_slot_mode()
             else:
                 self._do_CONNECT_proxy_mode()
 
@@ -341,7 +350,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.server_stat['waiting_requests'] -= 1
         self.server.lock.release()
             
-    def _do_CONNECT_slot_proxy_mode(self):
+    def _do_CONNECT_slot_mode(self):
         url = self.path
         host = url.split(':')[0]
         top_domain_name = get_top_domain_name(host)
@@ -512,7 +521,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return free_proxy_node_addr
 
-    def _do_others_proxy_mode_req(self, proxies=None, proxy_auth=None):
+    def _do_others_node_mode_req(self, proxies=None, proxy_auth=None):
         url = self.path
 
         if proxy_auth:
@@ -592,10 +601,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.lock.release()
 
 
-    def _do_others_proxy_mode(self):
-        self._do_others_proxy_mode_req()
+    def _do_others_node_mode(self):
+        self._do_others_node_mode_req()
 
-    def _do_others_slot_proxy_mode(self):
+    def _do_others_slot_mode(self):
         url = self.path
         parse = urlparse.urlparse(url)
         top_domain_name = get_top_domain_name(parse.netloc)
@@ -624,7 +633,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             proxy_auth = None
 
-        self._do_others_proxy_mode_req(proxies=proxies, proxy_auth=proxy_auth)
+        self._do_others_node_mode_req(proxies=proxies, proxy_auth=proxy_auth)
 
         self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
 
@@ -831,7 +840,7 @@ def main(args):
             p.daemon = args.daemon
         p.start()
 
-    if httpd_inst.server_info['service_mode'] == 'slot_proxy':
+    if httpd_inst.server_info['service_mode'] == 'slot':
         p = multiprocessing.Process(target=check_proxy_list, name='CheckProxyListProcess', args=(httpd_inst,))
         if args.daemon:
             p.daemon = args.daemon
@@ -839,7 +848,7 @@ def main(args):
 
 
     logger.info('POPS started pid %d' % pid)
-    if httpd_inst.server_info['service_mode'] == "slot_proxy":
+    if httpd_inst.server_info['service_mode'] == "slot":
         srv_name = "HTTP proxy slot server"
     else:
         srv_name = "HTTP proxy server"
@@ -898,9 +907,9 @@ if __name__ == "__main__":
                         help='default 1080')
 
     parser.add_argument('--mode',
-                        choices=['slot_proxy', 'proxy'],
-                        default='proxy',
-                        help='default proxy')
+                        choices=['slot', 'node'],
+                        default='node',
+                        help='default node')
 
     parser.add_argument('--processes',
                         default=multiprocessing.cpu_count(),

@@ -1,6 +1,6 @@
 {
   "server_info": {
-    "service_mode": "slot_proxy", 
+    "service_mode": "slot",
     "cpu_count": 4
   }, 
   "proxy_list": {

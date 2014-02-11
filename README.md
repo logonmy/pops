@@ -46,7 +46,7 @@ Show stat info
 
 ### HTTP proxy slot server
 
-    pops.py --mode slot_proxy --port 1080
+    pops.py --mode slot --port 1080
 
 
 Add nodes
@@ -73,7 +73,7 @@ Start it as daemon
         --processes `python -c "import multiprocessing; multiprocessing.cpu_count()"` \
         --error_log `pwd`/pops.log  \
         --pid `pwd`/pops.pid  \
-        --mode slot_proxy \
+        --mode slot \
         --addr 0.0.0.0 \
         --port 1080 \
         --daemon
