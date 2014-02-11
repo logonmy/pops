@@ -65,7 +65,7 @@ Use it as HTTP proxy server, it will auto slot same domain into different nodes.
     curl -v --proxy-basic --proxy-user 'god:hidemyass' --proxy 127.0.0.1:1080  http://www.imdb.com/title/tt0108778/
 
 
-### others
+### Others
 
 Start it as daemon
 
@@ -77,6 +77,11 @@ Start it as daemon
         --addr 0.0.0.0 \
         --port 1080 \
         --daemon
+
+
+Start it without authentication requirement
+
+    python pops.py  --proxy_auth= --auth=
 
 
 ## See also

@@ -420,6 +420,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 if err_no == errno.ECONNREFUSED:
                     self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
                     return
+                elif err_no == errno.ETIMEDOUT:
+                    self.send_error(httplib.BAD_GATEWAY, message='Forwarding failure')
+                    return
                 raise ex
 
         self.send_response(httplib.OK, message='Connection established')
@@ -438,23 +441,33 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             ready_rlist, ready_wlist, ready_elist = select.select(read_list, [], [])
             for sock in ready_rlist:
                 if sock == self.connection:
-                    data = self.connection.recv(BUFF_SIZE)
+                    try:
+                        data = self.connection.recv(BUFF_SIZE)
+                    except socket.error, ex:
+                        data = None
+                        err_no = ex.args[0]
+                        if err_no == errno.ECONNRESET:
+                            sock_src_shutdown = True
+                        else:
+                            raise ex
                     if data:
                         sock_dst.sendall(data)
-                        # count = sock_dst.send(data)
-                        # total_bytes = len(data)
-                        # print 'received %d bytes from client, forward %d bytes to target, remain %d bytes' % (total_bytes, count, total_bytes - count)
                     else:
                         msg = 'Client sent nothing, it seems has disconnected'
                         logger.debug(msg)
                         sock_src_shutdown = True
                 elif sock == sock_dst:
-                    data = sock_dst.recv(BUFF_SIZE)
+                    try:
+                        data = sock_dst.recv(BUFF_SIZE)
+                    except socket.error, ex:
+                        data = None
+                        err_no = ex.args[0]
+                        if err_no == errno.ECONNRESET:
+                            sock_dst_shutdown = True
+                        else:
+                            raise ex
                     if data:
                         self.connection.sendall(data)
-                        # total_bytes = len(data)
-                        # print 'received %d bytes from target, forward %d bytes to client, remain %d bytes' % (total_bytes, count, total_bytes - count)
-                        # self.connection.send(data)
                     else:
                         msg = 'Target sent nothing, it seems has disconnected'
                         logger.debug(msg)
@@ -768,7 +781,7 @@ def main(args):
     if hasattr(args.error_log, 'name'):
         error_log_path = getattr(args.error_log, 'name')
     else:
-        error_log_path = args.error_log
+        error_log_path = args.error_log or '/dev/stdout'
 
     if args.auth:
         splits = args.auth.split(':')
