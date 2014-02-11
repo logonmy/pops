@@ -43,6 +43,24 @@ class ProxyNodeStatus(object):
     UP_AND_RUNNING = 1
 
 
+def helper_send(sock, data):
+    total = len(data)
+    sent = 0
+    while sent < total:
+        count = sock.send(data[sent:])
+        sent += count
+    return total - sent
+
+def helper_recv_until(sock, until, BUFF_SIZE=4096):
+    data = ''
+    while data.find(until) == -1:
+        buf = sock.recv(BUFF_SIZE)
+        if not buf:
+            break
+        data += buf
+    return data
+
+
 def www_auth_required(func):
     @functools.wraps(func)
     def _wrapped_view(req):
@@ -145,18 +163,25 @@ def admin(req):
         req.send_error(httplib.NOT_FOUND)
         return
 
-    if parse.path == '/admin/proxy/add':
+    if parse.path in ['/admin/proxy/add', '/admin/proxy/reset']:
         addr = [i.strip() for i in qs_in_d['addr']]
 
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
 
         for new_proxy_sever in addr:
-            if new_proxy_sever not in my_proxy_list:
-                my_proxy_list[new_proxy_sever] = {
-                    '_status': ProxyNodeStatus.UP_AND_RUNNING,
-                }
-            req.log_message('Appended %s into proxy list' % new_proxy_sever)
+            if parse.path == '/admin/proxy/add':
+                if new_proxy_sever not in my_proxy_list:
+                    my_proxy_list[new_proxy_sever] = {
+                        '_status': ProxyNodeStatus.UP_AND_RUNNING,
+                    }
+                req.log_message('Appended %s into proxy list' % new_proxy_sever)
+            elif parse.path == '/admin/proxy/reset':
+                if new_proxy_sever in my_proxy_list:
+                    my_proxy_list[new_proxy_sever] = {
+                        '_status': ProxyNodeStatus.UP_AND_RUNNING,
+                    }
+                req.log_message('Appended %s into proxy list' % new_proxy_sever)
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
@@ -344,15 +369,17 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             if self.server.server_info['service_mode'] == 'slot':
                 self._do_CONNECT_slot_mode()
             else:
-                self._do_CONNECT_proxy_mode()
+                self._do_CONNECT_node_mode()
+            self.connection.close()
 
         self.server.lock.acquire()
         self.server.server_stat['waiting_requests'] -= 1
         self.server.lock.release()
             
     def _do_CONNECT_slot_mode(self):
-        url = self.path
-        host = url.split(':')[0]
+        # "CONNECT github.com:443 HTTP/1.1"
+        # path => 'github.com:443'
+        host = self.path.split(':')[0]
         top_domain_name = get_top_domain_name(host)
 
         free_proxy_node_addr = None
@@ -373,21 +400,21 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             sock_dst.connect((host, port))
         except socket.error, ex:
+            self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
             err_no, err_msg = ex.args
             if err_no == errno.ECONNREFUSED:
                 self.send_error(httplib.SERVICE_UNAVAILABLE)
-                self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
                 return
             raise ex
 
         req = self.raw_requestline + str(self.headers) + '\r\n'
-        msg = 'Forward request to target: ' + repr(req)
+        msg = 'Forward request from client to target: ' + repr(req)
         logger.debug(msg)
         sock_dst.sendall(req)
 
-        data = sock_dst.recv(4096)
-
-        msg = 'Forward request to client: ' + repr(data)
+        data = helper_recv_until(sock_dst, '\r\n' * 2)
+        # data = sock_dst.recv(4096)
+        msg = 'Forward request from target to client: ' + repr(data)
         logger.debug(msg)
 
         splits = data.rstrip('\r\n').split('\r\n')
@@ -397,11 +424,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         if status_code != httplib.OK:
             headers_in_str = '\r\n'.join(splits[1:])
+            self.send_response(status_code)
             sio = StringIO.StringIO(headers_in_str)
             msg = mimetools.Message(sio)
-
-            self.send_response(status_code)
-            # self.wfile.write(headers_in_str + '\r\n')
             for k in msg.dict.keys():
                 v = msg.dict[k]
                 self.send_header(k, v)
@@ -411,12 +436,13 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             return
 
 
-        self._do_CONNECT_proxy_mode(sock_dst=sock_dst)
+        self._do_CONNECT_node_mode(sock_dst=sock_dst)
+        sock_dst.close()
 
         self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
 
         
-    def _do_CONNECT_proxy_mode(self, sock_dst=None):
+    def _do_CONNECT_node_mode(self, sock_dst=None):
         if not sock_dst:
             host, port = self.path.split(':')
             port = int(port)
@@ -430,7 +456,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
                     return
                 elif err_no == errno.ETIMEDOUT:
-                    self.send_error(httplib.BAD_GATEWAY, message='Forwarding failure')
+                    self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
                     return
                 raise ex
 
@@ -440,14 +466,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         BUFF_SIZE = 4096
         sock_src_shutdown, sock_dst_shutdown = False, False
-        do_loop = True
-        while do_loop:
+        while (not sock_src_shutdown) and (not sock_dst_shutdown):
             read_list = []
             if not sock_dst_shutdown:
                 read_list.append(sock_dst)
             if not sock_src_shutdown:
                 read_list.append(self.connection)
-            ready_rlist, ready_wlist, ready_elist = select.select(read_list, [], [])
+            ready_rlist, ready_wlist, ready_elist = select.select(read_list, [], read_list)
+            assert not ready_elist
             for sock in ready_rlist:
                 if sock == self.connection:
                     try:
@@ -460,7 +486,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         else:
                             raise ex
                     if data:
-                        sock_dst.sendall(data)
+                        remain = helper_send(sock_dst, data)
+                        msg = 'sent to target %d bytes, remain %d bytes' % (len(data), remain)
+                        logger.debug(msg)
                     else:
                         msg = 'Client sent nothing, it seems has disconnected'
                         logger.debug(msg)
@@ -476,13 +504,13 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         else:
                             raise ex
                     if data:
-                        self.connection.sendall(data)
+                        remain = helper_send(self.connection, data)
+                        msg = 'sent to client %d bytes, remain %d bytes' % (len(data), remain)
+                        logger.debug(msg)
                     else:
                         msg = 'Target sent nothing, it seems has disconnected'
                         logger.debug(msg)
                         sock_dst_shutdown = True
-            if sock_src_shutdown and sock_dst_shutdown:
-                do_loop = False
 
     def _proxy_server_incr_concurrency(self, top_domain_name, step=1):
         free_proxy_node_addr = None
