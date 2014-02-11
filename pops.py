@@ -300,6 +300,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # See also: http://yyz.us/bitcoin/poold.py
         self.request.settimeout(3)
 
+    @property
+    def client_address_string(self):
+        return '%s:%d' % (self.client_address[0], self.client_address[1])
+
     def log_message(self, format, *args):
         logger.debug(format % args)
 
@@ -408,13 +412,12 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             raise ex
 
         req = self.raw_requestline + str(self.headers) + '\r\n'
-        msg = 'Forward request from client to target: ' + repr(req)
+        msg = 'Forward request from client %s to target %s: ' % (self.client_address_string, free_proxy_node_addr) + repr(req)
         logger.debug(msg)
         sock_dst.sendall(req)
 
         data = helper_recv_until(sock_dst, '\r\n' * 2)
-        # data = sock_dst.recv(4096)
-        msg = 'Forward request from target to client: ' + repr(data)
+        msg = 'Forward request from target %s to client %s: ' % (free_proxy_node_addr, self.client_address_string) + repr(data)
         logger.debug(msg)
 
         splits = data.rstrip('\r\n').split('\r\n')
@@ -487,8 +490,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                             raise ex
                     if data:
                         remain = helper_send(sock_dst, data)
-                        msg = 'sent to target %d bytes, remain %d bytes' % (len(data), remain)
-                        logger.debug(msg)
+                        if remain:
+                            msg = 'sent to target %d bytes, remain %d bytes' % (len(data), remain)
+                            logger.debug(msg)
                     else:
                         msg = 'Client sent nothing, it seems has disconnected'
                         logger.debug(msg)
@@ -505,8 +509,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                             raise ex
                     if data:
                         remain = helper_send(self.connection, data)
-                        msg = 'sent to client %d bytes, remain %d bytes' % (len(data), remain)
-                        logger.debug(msg)
+                        if remain:
+                            msg = 'sent to client %d bytes, remain %d bytes' % (len(data), remain)
+                            logger.debug(msg)
                     else:
                         msg = 'Target sent nothing, it seems has disconnected'
                         logger.debug(msg)
