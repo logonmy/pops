@@ -5,6 +5,7 @@ import copy
 import errno
 import functools
 import logging
+import mimetools
 import re
 import threading
 import time
@@ -15,6 +16,7 @@ import httplib
 import multiprocessing
 import socket
 import sys
+import StringIO
 import traceback
 import urlparse
 
@@ -69,7 +71,7 @@ def www_auth_required(func):
 def local_net_required(func):
     @functools.wraps(func)
     def _wrapped_view(req):
-        ALLOW_HOSTS = ('127.0.0.1', 'localhost')
+        ALLOW_HOSTS = ('127.0.0.1', 'localhost', socket.gethostname())
 
         if req.server.server_name in ALLOW_HOSTS:
             return func(req)
@@ -287,21 +289,16 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.server.server_stat['waiting_requests'] += 1
             self.server.lock.release()
 
-            if self.server.proxy_auth:
-                if self._do_proxy_auth():
-                    if self.server.server_info['service_mode'] == 'slot_proxy':
-                        self._do_slot_proxy()
-                    else:
-                        self._do_proxy()
-                else:
-                    self.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
-                    self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
-                    self.end_headers()
+            if self.server.proxy_auth and not self._check_proxy_auth():
+                self.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
+                self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
+                self.end_headers()
+                return
+
+            if self.server.server_info['service_mode'] == 'slot_proxy':
+                self._do_others_slot_proxy_mode()
             else:
-                if self.server.server_info['service_mode'] == 'slot_proxy':
-                    self._do_slot_proxy()
-                else:
-                    self._do_proxy()
+                self._do_others_proxy_mode()
 
             self.server.lock.acquire()
             self.server.server_stat['waiting_requests'] -= 1
@@ -322,19 +319,107 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.send_error(httplib.NOT_FOUND)
 
     def do_CONNECT(self):
-        host, port = self.path.split(':')
+        self.server.lock.acquire()
+        self.server.server_stat['requests'] += 1
+        self.server.lock.release()
+
+        self.server.lock.acquire()
+        self.server.server_stat['waiting_requests'] += 1
+        self.server.lock.release()
+
+        if self.server.proxy_auth and not self._check_proxy_auth():
+            self.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
+            self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
+            self.end_headers()
+        else:
+            if self.server.server_info['service_mode'] == 'slot_proxy':
+                self._do_CONNECT_slot_proxy_mode()
+            else:
+                self._do_CONNECT_proxy_mode()
+
+        self.server.lock.acquire()
+        self.server.server_stat['waiting_requests'] -= 1
+        self.server.lock.release()
+            
+    def _do_CONNECT_slot_proxy_mode(self):
+        url = self.path
+        host = url.split(':')[0]
+        top_domain_name = get_top_domain_name(host)
+
+        free_proxy_node_addr = None
+        while not free_proxy_node_addr:
+            free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
+            
+            if not free_proxy_node_addr:
+                self.send_response(httplib.SERVICE_UNAVAILABLE)
+                self.end_headers()
+                return
+
+        msg = 'Using free proxy node: ' + free_proxy_node_addr
+        logger.debug(msg)
+        host, port = free_proxy_node_addr.split(':')
         port = int(port)
 
         sock_dst = socket.socket()
-
         try:
             sock_dst.connect((host, port))
         except socket.error, ex:
             err_no, err_msg = ex.args
             if err_no == errno.ECONNREFUSED:
-                self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
+                self.send_error(httplib.SERVICE_UNAVAILABLE)
+                self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
                 return
-            else:
+            raise ex
+
+        req = self.raw_requestline + str(self.headers) + '\r\n'
+        msg = 'Forward request to target: ' + repr(req)
+        logger.debug(msg)
+        sock_dst.sendall(req)
+
+        data = sock_dst.recv(4096)
+
+        msg = 'Forward request to client: ' + repr(data)
+        logger.debug(msg)
+
+        splits = data.rstrip('\r\n').split('\r\n')
+        first_line = splits[0]
+        splits = first_line.split(' ')
+        status_code = int(splits[1])
+
+        if status_code != httplib.OK:
+            headers_in_str = '\r\n'.join(splits[1:])
+            sio = StringIO.StringIO(headers_in_str)
+            msg = mimetools.Message(sio)
+
+            self.send_response(status_code)
+            # self.wfile.write(headers_in_str + '\r\n')
+            for k in msg.dict.keys():
+                v = msg.dict[k]
+                self.send_header(k, v)
+            self.end_headers()
+
+            self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
+            return
+
+
+        self._do_CONNECT_proxy_mode(sock_dst=sock_dst)
+
+        self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
+
+        
+    def _do_CONNECT_proxy_mode(self, sock_dst=None):
+        if not sock_dst:
+            host, port = self.path.split(':')
+            port = int(port)
+
+            sock_dst = socket.socket()
+            try:
+                sock_dst.connect((host, port))
+            except socket.error, ex:
+                err_no, err_msg = ex.args
+                if err_no == errno.ECONNREFUSED:
+                    self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
+                    return
                 raise ex
 
         self.send_response(httplib.OK, message='Connection established')
@@ -342,7 +427,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.end_headers()
 
         BUFF_SIZE = 4096
-        read_list = [self.connection, sock_dst]
         sock_src_shutdown, sock_dst_shutdown = False, False
         do_loop = True
         while do_loop:
@@ -361,7 +445,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         # total_bytes = len(data)
                         # print 'received %d bytes from client, forward %d bytes to target, remain %d bytes' % (total_bytes, count, total_bytes - count)
                     else:
-                        msg = 'client sent nothing, it seems has disconnected'
+                        msg = 'Client sent nothing, it seems has disconnected'
                         logger.debug(msg)
                         sock_src_shutdown = True
                 elif sock == sock_dst:
@@ -372,7 +456,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         # print 'received %d bytes from target, forward %d bytes to client, remain %d bytes' % (total_bytes, count, total_bytes - count)
                         # self.connection.send(data)
                     else:
-                        msg = 'target sent nothing, it seems has disconnected'
+                        msg = 'Target sent nothing, it seems has disconnected'
                         logger.debug(msg)
                         sock_dst_shutdown = True
             if sock_src_shutdown and sock_dst_shutdown:
@@ -415,7 +499,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return free_proxy_node_addr
 
-    def _do_proxy_req(self, proxies=None, proxy_auth=None):
+    def _do_others_proxy_mode_req(self, proxies=None, proxy_auth=None):
         url = self.path
 
         if proxy_auth:
@@ -495,18 +579,18 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.lock.release()
 
 
-    def _do_proxy(self):
-        self._do_proxy_req()
+    def _do_others_proxy_mode(self):
+        self._do_others_proxy_mode_req()
 
-    def _do_slot_proxy(self):
+    def _do_others_slot_proxy_mode(self):
         url = self.path
-
         parse = urlparse.urlparse(url)
         top_domain_name = get_top_domain_name(parse.netloc)
+        # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
 
         free_proxy_node_addr = None
         while not free_proxy_node_addr:
-            free_proxy_node_addr = self._proxy_server_incr_concurrency(top_domain_name, step=1)
+            free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
 
             # if not free_proxy_node_addr:
             #     try:
@@ -527,11 +611,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             proxy_auth = None
 
-        self._do_proxy_req(proxies=proxies, proxy_auth=proxy_auth)
+        self._do_others_proxy_mode_req(proxies=proxies, proxy_auth=proxy_auth)
 
-        self._proxy_server_incr_concurrency(top_domain_name, step=-1)
+        self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
 
-    def _do_proxy_auth(self):
+    def _check_proxy_auth(self):
         value = self.headers.getheader('proxy-authorization')
         if value:
             if value.replace('Basic ', '').strip() == self.server.proxy_auth_base64:
@@ -745,7 +829,7 @@ def main(args):
     if httpd_inst.server_info['service_mode'] == "slot_proxy":
         srv_name = "HTTP proxy slot server"
     else:
-        srv_name = "HTTP proxy node"
+        srv_name = "HTTP proxy server"
     logger.info("Serving %s on %s port %s ..."  % (srv_name, server_address[0], server_address[1]))
 
 
