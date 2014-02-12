@@ -259,34 +259,6 @@ def get_top_domain_name(s):
         raise ValueError
 
 
-class HTTPResponse(httplib.HTTPResponse):
-    """ Extend httplib.HTTPResponse for auto read and save HTTP response body. """
-
-    def __init__(self,
-                 sock,
-                 debuglevel=0,
-                 strict=0,
-                 method=None,
-                 buffering=False,
-                 read_entry_body=True):
-        httplib.HTTPResponse.__init__(self,
-                                      sock=sock,
-                                      debuglevel=debuglevel,
-                                      strict=strict,
-                                      method=method,
-                                      buffering=buffering)
-
-        if read_entry_body:
-            self.begin()
-            self._entry_body = self.read()
-        else:
-            self._entry_body = None
-
-    @property
-    def entry_body(self):
-        return self._entry_body
-
-
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
     server_version = "POPS/" + __version__
@@ -311,19 +283,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         return self.do_GET()
 
     def do_GET(self):
-        self.server.lock.acquire()
-        self.server.server_stat['requests'] += 1
-        self.server.lock.release()
-
         parses = urlparse.urlparse(self.path)
         if parses.scheme and parses.netloc:
-            # # TODO: Should proxy forbidden access itself by itself?
-            # tar_addr, tar_port = parses.netloc.split(':')
-            # bind_addr, bind_port = self.server.server_settings['serving_on'].split(':')
-            # if tar_port == bind_port:
-            #     pass
-
+            # TODO: Should proxy forbidden access itself via itself?
             self.server.lock.acquire()
+            self.server.server_stat['requests'] += 1
             self.server.server_stat['waiting_requests'] += 1
             self.server.lock.release()
 
@@ -331,12 +295,23 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
                 self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
                 self.end_headers()
-                return
-
-            if self.server.server_info['service_mode'] == 'slot':
-                self._do_others_slot_mode()
             else:
-                self._do_others_node_mode()
+                url = self.path
+                parse = urlparse.urlparse(url)
+                top_domain_name = get_top_domain_name(parse.netloc)
+                # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
+
+                free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
+                if not free_proxy_node_addr:
+                    self.send_response(httplib.SERVICE_UNAVAILABLE)
+                    self.end_headers()
+
+                if self.server.server_info['service_mode'] == 'slot':
+                    self._do_others_slot_mode()
+                else:
+                    self._do_others_node_mode()
+
+                self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
 
             self.server.lock.acquire()
             self.server.server_stat['waiting_requests'] -= 1
@@ -359,9 +334,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     def do_CONNECT(self):
         self.server.lock.acquire()
         self.server.server_stat['requests'] += 1
-        self.server.lock.release()
-
-        self.server.lock.acquire()
         self.server.server_stat['waiting_requests'] += 1
         self.server.lock.release()
 
@@ -370,33 +342,34 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
             self.end_headers()
         else:
-            if self.server.server_info['service_mode'] == 'slot':
-                self._do_CONNECT_slot_mode()
+            # request_line => "CONNECT github.com:443 HTTP/1.1"
+            # path => 'github.com:443'
+            # host => 'github.com'
+            # top_domain_name => 'github.com'
+            host = self.path.split(':')[0]
+            top_domain_name = get_top_domain_name(host)
+
+            free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
+            if free_proxy_node_addr:
+                msg = 'Using free proxy node: ' + free_proxy_node_addr
+                logger.debug(msg)
+
+                if self.server.server_info['service_mode'] == 'slot':
+                    self._do_CONNECT_slot_mode(free_proxy_node_addr)
+                else:
+                    self._do_CONNECT_node_mode()
             else:
-                self._do_CONNECT_node_mode()
+                self.send_response(httplib.SERVICE_UNAVAILABLE)
+                self.end_headers()
+            self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
+
             self.connection.close()
 
         self.server.lock.acquire()
         self.server.server_stat['waiting_requests'] -= 1
         self.server.lock.release()
             
-    def _do_CONNECT_slot_mode(self):
-        # "CONNECT github.com:443 HTTP/1.1"
-        # path => 'github.com:443'
-        host = self.path.split(':')[0]
-        top_domain_name = get_top_domain_name(host)
-
-        free_proxy_node_addr = None
-        while not free_proxy_node_addr:
-            free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
-            
-            if not free_proxy_node_addr:
-                self.send_response(httplib.SERVICE_UNAVAILABLE)
-                self.end_headers()
-                return
-
-        msg = 'Using free proxy node: ' + free_proxy_node_addr
-        logger.debug(msg)
+    def _do_CONNECT_slot_mode(self, free_proxy_node_addr):
         host, port = free_proxy_node_addr.split(':')
         port = int(port)
 
@@ -404,7 +377,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             sock_dst.connect((host, port))
         except socket.error, ex:
-            self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
             err_no, err_msg = ex.args
             if err_no == errno.ECONNREFUSED:
                 self.send_error(httplib.SERVICE_UNAVAILABLE)
@@ -434,16 +406,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 v = msg.dict[k]
                 self.send_header(k, v)
             self.end_headers()
-
-            self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
             return
-
 
         self._do_CONNECT_node_mode(sock_dst=sock_dst)
         sock_dst.close()
-
-        self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
-
         
     def _do_CONNECT_node_mode(self, sock_dst=None):
         if not sock_dst:
@@ -491,7 +457,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     if data:
                         remain = helper_send(sock_dst, data)
                         if remain:
-                            msg = 'sent to target %d bytes, remain %d bytes' % (len(data), remain)
+                            msg = 'Client sent %d bytes to target, remain %d bytes' % (len(data), remain)
                             logger.debug(msg)
                     else:
                         msg = 'Client sent nothing, it seems has disconnected'
@@ -510,22 +476,24 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     if data:
                         remain = helper_send(self.connection, data)
                         if remain:
-                            msg = 'sent to client %d bytes, remain %d bytes' % (len(data), remain)
+                            msg = 'Target sent %d bytes to client, remain %d bytes' % (len(data), remain)
                             logger.debug(msg)
                     else:
                         msg = 'Target sent nothing, it seems has disconnected'
                         logger.debug(msg)
                         sock_dst_shutdown = True
 
+        self.server.lock.acquire()
+        self.server.server_stat['forward_requests'] += 1
+        self.server.lock.release()
+
     def _proxy_server_incr_concurrency(self, top_domain_name, step=1):
         free_proxy_node_addr = None
 
         self.server.lock.acquire()
-
         # NOTICE: We have to do deepcopy and modify it, then re-assign it back,
         # see this for more detail http://docs.python.org/2/library/multiprocessing.html#multiprocessing.managers.SyncManager.list
         my_proxy_list = copy.deepcopy(self.server.proxy_list)
-
         try:
             for proxy_node_addr in my_proxy_list.keys():
                 domain_name_map = my_proxy_list[proxy_node_addr]
@@ -554,7 +522,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return free_proxy_node_addr
 
-    def _do_others_node_mode_req(self, proxies=None, proxy_auth=None):
+    def _do_others_node_mode(self, proxies=None, proxy_auth=None):
         url = self.path
 
         if proxy_auth:
@@ -633,42 +601,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.server_stat['proxy_requests'] += 1
         self.server.lock.release()
 
-
-    def _do_others_node_mode(self):
-        self._do_others_node_mode_req()
-
-    def _do_others_slot_mode(self):
-        url = self.path
-        parse = urlparse.urlparse(url)
-        top_domain_name = get_top_domain_name(parse.netloc)
-        # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
-
-        free_proxy_node_addr = None
-        while not free_proxy_node_addr:
-            free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
-
-            # if not free_proxy_node_addr:
-            #     try:
-            #         time.sleep(random.random() * PROXY_SERVER_SEND_TIMEOUT)
-            #     except KeyboardInterrupt:
-            #         pass
-
-            if not free_proxy_node_addr:
-                self.send_response(httplib.SERVICE_UNAVAILABLE)
-                self.end_headers()
-                return
-
+    def _do_others_slot_mode(self, free_proxy_node_addr):
         proxies = {"http" : "http://" + free_proxy_node_addr}
-
         value = self.headers.getheader('proxy-authorization')
         if value:
             proxy_auth =  base64.decodestring(value.replace('Basic ', '').strip()).split(':')
         else:
             proxy_auth = None
-
-        self._do_others_node_mode_req(proxies=proxies, proxy_auth=proxy_auth)
-
-        self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
+        self._do_others_node_mode(proxies=proxies, proxy_auth=proxy_auth)
 
     def _check_proxy_auth(self):
         value = self.headers.getheader('proxy-authorization')
@@ -844,6 +784,7 @@ def main(args):
     httpd_inst.server_stat = mp_manager.dict({
         'waiting_requests': 0,
         'proxy_requests': 0,
+        'forward_requests': 0,
         'requests': 0,
     })
 
