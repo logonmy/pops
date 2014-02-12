@@ -205,8 +205,7 @@ def admin(req):
                 my_proxy_list[proxy_sever]['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
 
             req.log_message('Switch proxy node %s status to %d' %
-                                proxy_sever,
-                                ProxyNodeStatus.DELETED_OR_DOWN)
+                            (proxy_sever,ProxyNodeStatus.DELETED_OR_DOWN))
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
@@ -302,14 +301,17 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
 
                 free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
-                if not free_proxy_node_addr:
+                if free_proxy_node_addr:
+                    msg = 'Using free proxy node: ' + free_proxy_node_addr
+                    logger.debug(msg)
+
+                    if self.server.server_info['service_mode'] == 'slot':
+                        self._do_OTHERS_slot_mode(free_proxy_node_addr=free_proxy_node_addr)
+                    else:
+                        self._do_OTHERS_node_mode()
+                else:
                     self.send_response(httplib.SERVICE_UNAVAILABLE)
                     self.end_headers()
-
-                if self.server.server_info['service_mode'] == 'slot':
-                    self._do_OTHERS_slot_mode(free_proxy_node_addr=free_proxy_node_addr)
-                else:
-                    self._do_OTHERS_node_mode()
 
                 self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
 
