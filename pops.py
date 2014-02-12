@@ -307,9 +307,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     self.end_headers()
 
                 if self.server.server_info['service_mode'] == 'slot':
-                    self._do_others_slot_mode()
+                    self._do_OTHERS_slot_mode(free_proxy_node_addr=free_proxy_node_addr)
                 else:
-                    self._do_others_node_mode()
+                    self._do_OTHERS_node_mode()
 
                 self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
 
@@ -522,7 +522,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return free_proxy_node_addr
 
-    def _do_others_node_mode(self, proxies=None, proxy_auth=None):
+    def _do_OTHERS_node_mode(self, proxies=None, proxy_auth=None):
         url = self.path
 
         if proxy_auth:
@@ -601,14 +601,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.server_stat['proxy_requests'] += 1
         self.server.lock.release()
 
-    def _do_others_slot_mode(self, free_proxy_node_addr):
+    def _do_OTHERS_slot_mode(self, free_proxy_node_addr):
         proxies = {"http" : "http://" + free_proxy_node_addr}
         value = self.headers.getheader('proxy-authorization')
         if value:
             proxy_auth =  base64.decodestring(value.replace('Basic ', '').strip()).split(':')
         else:
             proxy_auth = None
-        self._do_others_node_mode(proxies=proxies, proxy_auth=proxy_auth)
+        self._do_OTHERS_node_mode(proxies=proxies, proxy_auth=proxy_auth)
 
     def _check_proxy_auth(self):
         value = self.headers.getheader('proxy-authorization')
