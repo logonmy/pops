@@ -403,7 +403,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 # print 'post_vars', post_vars
                 # self._do_OTHERS_node_mode(data=post_vars, headers=filtered_headers_in_d)
                 # return
-                pass
+                self.send_error(httplib.NOT_IMPLEMENTED)
+                return
         self._do_OTHERS_node_mode()
 
     @request_stat_required
@@ -779,7 +780,7 @@ def serve_forever(httpd_inst):
 class POPServer(BaseHTTPServer.HTTPServer):
 
     allow_reuse_address = True
-    protocol_version = "HTTP/1.0"
+    protocol_version = "HTTP/1.1"
 
     lock = None
     proxy_list = None
