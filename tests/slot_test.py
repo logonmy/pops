@@ -16,15 +16,17 @@ class TestSlot(unittest.TestCase):
 
     def setUp(self):
         proxy_ip_addr_port_list = ','.join(requests.get(url=config.URL_STAT, auth=auth).json()['proxy_list'].keys())
-        url_add_node = config.URL_ADMIN + '/proxy/delete?addr=' + proxy_ip_addr_port_list
-        r = requests.get(url=url_add_node, auth=auth)
-        assert r.status_code == httplib.OK
+        if proxy_ip_addr_port_list:
+            url_add_node = config.URL_ADMIN + '/proxy/delete?addr=' + proxy_ip_addr_port_list
+            r = requests.get(url=url_add_node, auth=auth)
+            assert r.status_code == httplib.OK
 
     def tearDown(self):
         proxy_ip_addr_port_list = ','.join(requests.get(url=config.URL_STAT, auth=auth).json()['proxy_list'].keys())
-        url_add_node = config.URL_ADMIN + '/proxy/delete?addr=' + proxy_ip_addr_port_list
-        r = requests.get(url=url_add_node, auth=auth)
-        assert r.status_code == httplib.OK
+        if proxy_ip_addr_port_list:
+            url_add_node = config.URL_ADMIN + '/proxy/delete?addr=' + proxy_ip_addr_port_list
+            r = requests.get(url=url_add_node, auth=auth)
+            assert r.status_code == httplib.OK
 
     def test_slot_one_node_method_head(self):
         r = requests.head('http://baidu.com', proxies=config.proxies, auth=proxy_auth)

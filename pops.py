@@ -537,7 +537,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         except requests.exceptions.Timeout:
             self.log_error('Request %s timeout' % self.path)
 
-            self.send_response(httplib.GATEWAY_TIMEOUT)
+            self.send_response(httplib.SERVICE_UNAVAILABLE)
             self.end_headers()
             return
 
@@ -551,7 +551,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         except socket.timeout:
             self.log_error('Request %s timeout' % self.path)
 
-            self.send_response(httplib.GATEWAY_TIMEOUT)
+            self.send_response(httplib.SERVICE_UNAVAILABLE)
             self.end_headers()
             return
 
