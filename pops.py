@@ -358,6 +358,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     logger.debug(msg)
                     self._do_OTHERS_node_mode(free_proxy_node_addr=free_proxy_node_addr)
                 else:
+                    msg = 'Free proxy node not found'
                     self.send_response(httplib.SERVICE_UNAVAILABLE)
                     self.end_headers()
                 self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
@@ -565,7 +566,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 concurrency = domain_name_map.get(top_domain_name, 0)
                 # this proxy allow to crawl records from this domain name in concurrency mode
                 if step > 0:
-                    if concurrency < int(self.server.server_settings['node_per_domain_max_concurrency']):
+                    if (concurrency < int(self.server.server_settings['node_per_domain_max_concurrency'])) and \
+                            (int(domain_name_map['_status']) > ProxyNodeStatus.DELETED_OR_DOWN):
                         if top_domain_name in domain_name_map:
                             my_proxy_list[proxy_node_addr][top_domain_name] += step
                         else:
@@ -664,7 +666,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.server.lock.release()
 
 
-def test_http_proxy(lock, down_node_list, proxy_node_addr, proxy_auth, timeout):
+def test_http_proxy(down_node_list, proxy_node_addr, proxy_auth, timeout, lock=None):
     proxies = {'http': 'http://' + proxy_node_addr}
 
     try:
@@ -702,9 +704,10 @@ def test_http_proxy(lock, down_node_list, proxy_node_addr, proxy_auth, timeout):
 
             return False
 
-    lock.acquire()
-    down_node_list[proxy_node_addr] = 'unknown'
-    lock.release()
+    if lock and hasattr(lock, 'acquire'):
+        lock.acquire()
+        down_node_list[proxy_node_addr] = 'unknown'
+        lock.release()
 
     return False
 
