@@ -1,4 +1,5 @@
 URL_ADMIN = 'http://127.0.0.1:1080/admin'
+URL_STAT = 'http://127.0.0.1:1080/stat/'
 
 proxies = {
     'http': 'http://127.0.0.1:1080',

@@ -164,12 +164,12 @@ def admin(req):
         return
 
     if parse.path in ['/admin/proxy/add', '/admin/proxy/reset']:
-        addr = [i.strip() for i in qs_in_d['addr']]
+        addr_list = [i.strip() for i in qs_in_d['addr'][0].split(',')]
 
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
 
-        for new_proxy_sever in addr:
+        for new_proxy_sever in addr_list:
             if parse.path == '/admin/proxy/add':
                 if new_proxy_sever not in my_proxy_list:
                     my_proxy_list[new_proxy_sever] = {
@@ -192,20 +192,15 @@ def admin(req):
 
 
     elif parse.path == '/admin/proxy/delete':
-        addr = [i.strip() for i in qs_in_d['addr']]
+        addr_list = set([i.strip() for i in qs_in_d['addr'][0].split(',')])
 
         req.server.lock.acquire()
         my_proxy_list = copy.deepcopy(req.server.proxy_list)
 
-        for proxy_sever in addr:
-            if proxy_sever not in my_proxy_list:
-                continue
-
-            if my_proxy_list[proxy_sever]['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
-                my_proxy_list[proxy_sever]['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
-
-            req.log_message('Switch proxy node %s status to %d' %
-                            (proxy_sever,ProxyNodeStatus.DELETED_OR_DOWN))
+        for addr_ip_port in addr_list:
+            if addr_ip_port in my_proxy_list:
+                my_proxy_list.pop(addr_ip_port)
+                req.log_message('Delete proxy node %s' % addr_ip_port)
 
         req.server.proxy_list.clear()
         req.server.proxy_list.update(my_proxy_list)
