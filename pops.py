@@ -426,7 +426,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         else:
             self.send_response(httplib.SERVICE_UNAVAILABLE)
             self.end_headers()
-        self.connection.close()
+
+        conn_type = self.headers.get('Connection', "")
+        if (conn_type.lower() != 'keep-alive' and self.protocol_version < "HTTP/1.1"):
+            self.connection.close()
+
         self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
 
     def _do_CONNECT_slot_mode(self, free_proxy_node_addr):
