@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import argparse
 import base64
+import cgi
 import copy
 import errno
 import functools
@@ -30,11 +31,32 @@ import select
 __version__ = "201401"
 
 
-
 logging.basicConfig(format='%(asctime)s [%(levelname)s] [%(process)d] %(message)s',
                     datefmt='%Y-%m-%d %I:%M:%S',
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+
+class SocketHelper(object):
+
+    @staticmethod
+    def send(sock, data):
+        total = len(data)
+        sent = 0
+        while sent < total:
+            count = sock.send(data[sent:])
+            sent += count
+        return total - sent
+
+    @staticmethod
+    def recv_until(sock, until, BUFF_SIZE=4096):
+        data = ''
+        while data.find(until) == -1:
+            buf = sock.recv(BUFF_SIZE)
+            if not buf:
+                break
+            data += buf
+        return data
 
 
 class ProxyNodeStatus(object):
@@ -43,102 +65,117 @@ class ProxyNodeStatus(object):
     UP_AND_RUNNING = 1
 
 
-def helper_send(sock, data):
-    total = len(data)
-    sent = 0
-    while sent < total:
-        count = sock.send(data[sent:])
-        sent += count
-    return total - sent
-
-def helper_recv_until(sock, until, BUFF_SIZE=4096):
-    data = ''
-    while data.find(until) == -1:
-        buf = sock.recv(BUFF_SIZE)
-        if not buf:
-            break
-        data += buf
-    return data
-
-
-def www_auth_required(func):
-    @functools.wraps(func)
-    def _wrapped_view(req):
-        value = req.headers.getheader('authorization')
-        if not req.server.auth:
-            return func(req)
-
+def auth_required(func):
+    def check_authorization(handler_obj):
+        value = handler_obj.headers.getheader('authorization')
         if value:
-            basic_credentials = value.replace('Basic ', '').strip()
-            if basic_credentials == req.server.auth_base64:
-                return func(req)
+            if value.replace('Basic ', '').strip() == handler_obj.server.auth_base64:
+                return True
+        return False
 
-        message, explain = req.responses[httplib.UNAUTHORIZED]
-        entry_body = explain + "\n"
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):          
+        if handler_obj.server.proxy_auth and not check_authorization(handler_obj):                    
+            handler_obj.send_response(httplib.UNAUTHORIZED)
+            handler_obj.send_header('WWW-Authenticate', 'Basic realm="HelloWorld"')
+            handler_obj.end_headers()
+            return
+        else:
+            return func(handler_obj, *args, **kwargs)
+    return _wrapped
 
-        req.send_response(httplib.UNAUTHORIZED)
-        req.send_header('Content-Type', 'text/html; charset=utf-8')
-        req.send_header('WWW-Authenticate', 'Basic realm="HelloWorld"')
-        req.end_headers()
+def proxy_auth_required(func):
+    def check_proxy_authorization(handler_obj):
+        value = handler_obj.headers.getheader('proxy-authorization')
+        if value:
+            if value.replace('Basic ', '').strip() == handler_obj.server.proxy_auth_base64:
+                return True
+        return False
 
-        if req.command != 'HEAD':
-            req.wfile.write(entry_body)
-        return
-    return _wrapped_view
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):          
+        if handler_obj.server.proxy_auth and not check_proxy_authorization(handler_obj):                    
+            handler_obj.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
+            handler_obj.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
+            handler_obj.end_headers()
+            return
+        else:
+            return func(handler_obj, *args, **kwargs)
+    return _wrapped
+
 
 def local_net_required(func):
     @functools.wraps(func)
-    def _wrapped_view(req):
+    def _wrapped_view(handler_obj):
         ALLOW_HOSTS = ('127.0.0.1', 'localhost', socket.gethostname())
 
-        if req.server.server_name in ALLOW_HOSTS:
-            return func(req)
+        if handler_obj.server.server_name in ALLOW_HOSTS:
+            return func(handler_obj)
         else:
-            req.send_error(code=httplib.FORBIDDEN, message='allow local net only')
+            handler_obj.send_error(code=httplib.FORBIDDEN, message='allow local net only')
             return
     return _wrapped_view
 
+def request_stat_required(func):
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):
+        handler_obj.server.lock.acquire()
+        handler_obj.server.server_stat['requests'] += 1
+        handler_obj.server.server_stat['waiting_requests'] += 1
+        handler_obj.server.lock.release()
 
+        try:
+            r = func(handler_obj, *args, **kwargs)
+        except Exception:
+            r = None
+            traceback.print_exc(file=sys.stderr)
+            handler_obj.send_error(httplib.INTERNAL_SERVER_ERROR)
 
-def default_body(req):
-    req.send_response(httplib.OK)
-    req.send_header('Content-Type', 'text/html; charset=utf-8')
-    req.end_headers()
+        handler_obj.server.lock.acquire()
+        handler_obj.server.server_stat['waiting_requests'] -= 1
+        handler_obj.server.lock.release()
+        return r
+    return _wrapped
+
+def default_body(handler_obj):
+    handler_obj.send_response(httplib.OK)
+    handler_obj.send_header('Content-Type', 'text/html; charset=utf-8')
+    handler_obj.end_headers()
 
     entry_body = "<html><head><title>Welcome to POPS!</title></head><body>" \
                    "<h1>Welcome to POPS!</h1>" \
                     "</html>\n"
-    req.wfile.write(entry_body)
+    handler_obj.wfile.write(entry_body)
 
-def favicon(req):
-    req.send_error(httplib.NOT_FOUND)
-
-
-@www_auth_required
-def stat(req):
-    req.send_response(httplib.OK)
-    req.send_header('Content-Type', 'application/json')
-    req.end_headers()
+def favicon(handler_obj):
+    handler_obj.send_error(httplib.NOT_FOUND)
 
 
-    req.server.lock.acquire()
-    proxy_list_d = copy.deepcopy(req.server.proxy_list)
-    req.server.lock.release()
+@auth_required
+def stat(handler_obj):
+    handler_obj.send_response(httplib.OK)
+    handler_obj.send_header('Content-Type', 'application/json')
+    handler_obj.end_headers()
+
+
+    handler_obj.server.lock.acquire()
+    proxy_list_d = copy.deepcopy(handler_obj.server.proxy_list)
+    handler_obj.server.lock.release()
 
     total_up_nodes = 0
     for proxy_node_addr in proxy_list_d.keys():
         if proxy_list_d[proxy_node_addr]['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
             total_up_nodes += 1
 
-    server_stat_d = copy.deepcopy(req.server.server_stat)
+    server_stat_d = copy.deepcopy(handler_obj.server.server_stat)
     server_stat_d['total_up_nodes'] = total_up_nodes
 
     server_stat_d['total_nodes'] = len(proxy_list_d.keys())
 
 
-    server_info_d = copy.deepcopy(req.server.server_info)
+    server_info_d = copy.deepcopy(handler_obj.server.server_info)
 
-    server_settings_d = copy.deepcopy(req.server.server_settings)
+    server_settings_d = copy.deepcopy(handler_obj.server.server_settings)
 
 
     migrated = {
@@ -149,25 +186,25 @@ def stat(req):
     }
     entry_body = json.dumps(migrated, indent=2) + "\n"
 
-    if req.command != 'HEAD':
-        req.wfile.write(entry_body)
+    if handler_obj.command != 'HEAD':
+        handler_obj.wfile.write(entry_body)
 
 
 @local_net_required
-@www_auth_required
-def admin(req):
-    parse = urlparse.urlparse(req.path)
+@auth_required
+def admin(handler_obj):
+    parse = urlparse.urlparse(handler_obj.path)
     qs_in_d = urlparse.parse_qs(parse.query)
 
-    if req.server.server_info['service_mode'] != 'slot':
-        req.send_error(httplib.NOT_FOUND)
+    if handler_obj.server.server_info['service_mode'] != 'slot':
+        handler_obj.send_error(httplib.NOT_FOUND)
         return
 
     if parse.path in ['/admin/proxy/add', '/admin/proxy/reset']:
         addr_list = [i.strip() for i in qs_in_d['addr'][0].split(',')]
 
-        req.server.lock.acquire()
-        my_proxy_list = copy.deepcopy(req.server.proxy_list)
+        handler_obj.server.lock.acquire()
+        my_proxy_list = copy.deepcopy(handler_obj.server.proxy_list)
 
         for new_proxy_sever in addr_list:
             if parse.path == '/admin/proxy/add':
@@ -175,64 +212,64 @@ def admin(req):
                     my_proxy_list[new_proxy_sever] = {
                         '_status': ProxyNodeStatus.UP_AND_RUNNING,
                     }
-                req.log_message('Appended %s into proxy list' % new_proxy_sever)
+                handler_obj.log_message('Appended %s into proxy list' % new_proxy_sever)
             elif parse.path == '/admin/proxy/reset':
                 if new_proxy_sever in my_proxy_list:
                     my_proxy_list[new_proxy_sever] = {
                         '_status': ProxyNodeStatus.UP_AND_RUNNING,
                     }
-                req.log_message('Appended %s into proxy list' % new_proxy_sever)
+                handler_obj.log_message('Appended %s into proxy list' % new_proxy_sever)
 
-        req.server.proxy_list.clear()
-        req.server.proxy_list.update(my_proxy_list)
-        req.server.lock.release()
+        handler_obj.server.proxy_list.clear()
+        handler_obj.server.proxy_list.update(my_proxy_list)
+        handler_obj.server.lock.release()
 
-        req.send_response(httplib.OK)
+        handler_obj.send_response(httplib.OK)
         return
 
 
     elif parse.path == '/admin/proxy/delete':
         addr_list = set([i.strip() for i in qs_in_d['addr'][0].split(',')])
 
-        req.server.lock.acquire()
-        my_proxy_list = copy.deepcopy(req.server.proxy_list)
+        handler_obj.server.lock.acquire()
+        my_proxy_list = copy.deepcopy(handler_obj.server.proxy_list)
 
         for addr_ip_port in addr_list:
             if addr_ip_port in my_proxy_list:
                 my_proxy_list.pop(addr_ip_port)
-                req.log_message('Delete proxy node %s' % addr_ip_port)
+                handler_obj.log_message('Delete proxy node %s' % addr_ip_port)
 
-        req.server.proxy_list.clear()
-        req.server.proxy_list.update(my_proxy_list)
-        req.server.lock.release()
+        handler_obj.server.proxy_list.clear()
+        handler_obj.server.proxy_list.update(my_proxy_list)
+        handler_obj.server.lock.release()
 
-        req.send_response(httplib.OK)
+        handler_obj.send_response(httplib.OK)
         return
 
     elif parse.path == '/admin/server_settings/update':
         k, v = qs_in_d['k'][0], qs_in_d['v'][0]
 
-        req.server.lock.acquire()
-        if k in req.server.server_settings:
-            req.server.server_settings[k] = v
-        req.server.lock.release()
+        handler_obj.server.lock.acquire()
+        if k in handler_obj.server.server_settings:
+            handler_obj.server.server_settings[k] = v
+        handler_obj.server.lock.release()
 
-        req.send_response(httplib.OK)
+        handler_obj.send_response(httplib.OK)
         return
 
-    req.send_error(httplib.NOT_FOUND)
+    handler_obj.send_error(httplib.NOT_FOUND)
 
 
-def ping(req):
-    req.send_response(httplib.OK)
-    req.send_header('Content-Type', 'text/plain')
-    req.end_headers()
+def ping(handler_obj):
+    handler_obj.send_response(httplib.OK)
+    handler_obj.send_header('Content-Type', 'text/plain')
+    handler_obj.end_headers()
 
-    if req.command != 'HEAD':
-        req.wfile.write('pong')
+    if handler_obj.command != 'HEAD':
+        handler_obj.wfile.write('pong')
 
-def test(req):
-    req.send_response(httplib.NOT_FOUND)
+def test(handler_obj):
+    handler_obj.send_response(httplib.NOT_FOUND)
 
 
 handler_list = (
@@ -251,6 +288,35 @@ def get_top_domain_name(s):
         return s[s.index('.') + 1:]
     else:
         raise ValueError
+
+def filter_hop_by_hop_headers(headers, ignore_header_list=None):
+    # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
+    HOP_BY_HOP_HEADERS = (
+        'TE',
+        'Transfer-Encoding',
+        'Keep-Alive',
+        'Proxy-Authorization',
+        'Proxy-Authentication',
+        'Trailer',
+        'Upgrade',
+    )
+    drop_headers_list = set(i.lower() for i in HOP_BY_HOP_HEADERS)
+    if ignore_header_list:
+        drop_headers_list = drop_headers_list.union(set(ignore_header_list))
+    headers_filtered = {}
+    for k in headers.keys():
+        if k.lower() not in drop_headers_list:
+            headers_filtered[k] = headers[k]
+    return headers_filtered
+
+def fix_post_vars(post_vars):
+    data = {}
+    for k, v in post_vars.iteritems():
+        if len(v) == 1:
+            data[k] = v[0].strip()
+        else:
+            data[k] = v
+    return data
 
 
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -276,96 +342,92 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     def do_HEAD(self):
         return self.do_GET()
 
+    @request_stat_required
     def do_GET(self):
         parses = urlparse.urlparse(self.path)
         if parses.scheme and parses.netloc:
-            # TODO: Should proxy forbidden access itself via itself?
-            self.server.lock.acquire()
-            self.server.server_stat['requests'] += 1
-            self.server.server_stat['waiting_requests'] += 1
-            self.server.lock.release()
-
-            if self.server.proxy_auth and not self._check_proxy_auth():
-                self.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
-                self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
-                self.end_headers()
-            else:
-                url = self.path
-                parse = urlparse.urlparse(url)
-                top_domain_name = get_top_domain_name(parse.netloc)
+            if self.server.server_info['service_mode'] == 'slot':
+                request_target = self.path
+                parses = urlparse.urlparse(request_target)
+                top_domain_name = get_top_domain_name(parses.netloc)
                 # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
 
                 free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
                 if free_proxy_node_addr:
                     msg = 'Using free proxy node: ' + free_proxy_node_addr
                     logger.debug(msg)
-
-                    if self.server.server_info['service_mode'] == 'slot':
-                        self._do_OTHERS_slot_mode(free_proxy_node_addr=free_proxy_node_addr)
-                    else:
-                        self._do_OTHERS_node_mode()
+                    self._do_OTHERS_node_mode(free_proxy_node_addr=free_proxy_node_addr)
                 else:
                     self.send_response(httplib.SERVICE_UNAVAILABLE)
                     self.end_headers()
-
                 self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
-
-            self.server.lock.acquire()
-            self.server.server_stat['waiting_requests'] -= 1
-            self.server.lock.release()
-
+            else:
+                self._do_OTHERS_node_mode()
         else:
             map = dict(handler_list)
             for path_in_re in map.keys():
                 left_slash_stripped = self.path[1:]
                 if re.compile(path_in_re).match(left_slash_stripped):
-                    try:
-                        map[path_in_re](self)
-                    except Exception:
-                        traceback.print_exc(file=sys.stderr)
-                        self.send_error(httplib.INTERNAL_SERVER_ERROR)
-                    return
-
+                    return map[path_in_re](self)
             self.send_error(httplib.NOT_FOUND)
 
+    @request_stat_required
+    @proxy_auth_required
+    def do_POST(self):
+        print '*' * 40
+        print self.requestline
+        print self.headers
+        print '*' * 40
+
+        entry_body_length = int(self.headers.getheader('content-length', 0))
+        content_type, ct_parameters_dict = cgi.parse_header(self.headers.getheader('content-type'))
+        if entry_body_length:
+            ignore_header_list = {'Host'}
+            filtered_headers_in_d = filter_hop_by_hop_headers(self.headers, ignore_header_list)
+
+            # always rewrite it
+            # http://tools.ietf.org/html/rfc2616#section-14.23
+            # http://tools.ietf.org/html/rfc2616#section-5.2
+            # http://tools.ietf.org/html/rfc2616#section-19.6.1.1
+            request_target = self.path
+            parses = urlparse.urlparse(request_target)
+            filtered_headers_in_d['Host'] = parses.netloc
+
+            if content_type == 'application/x-www-form-urlencoded':
+                entry_body = self.rfile.read(entry_body_length)
+                post_vars = urlparse.parse_qs(entry_body, keep_blank_values=1)
+                self._do_OTHERS_node_mode(data=post_vars, headers=filtered_headers_in_d)
+                return
+            elif content_type == 'multipart/form-data':
+                # post_vars = cgi.parse_multipart(self.rfile, ct_parameters_dict)
+                # print 'post_vars', post_vars
+                # self._do_OTHERS_node_mode(data=post_vars, headers=filtered_headers_in_d)
+                # return
+                pass
+        self._do_OTHERS_node_mode()
+
+    @request_stat_required
+    @proxy_auth_required
     def do_CONNECT(self):
-        self.server.lock.acquire()
-        self.server.server_stat['requests'] += 1
-        self.server.server_stat['waiting_requests'] += 1
-        self.server.lock.release()
+        request_target = self.path
+        host = request_target.split(':')[0]
+        top_domain_name = get_top_domain_name(host)
 
-        if self.server.proxy_auth and not self._check_proxy_auth():
-            self.send_response(httplib.PROXY_AUTHENTICATION_REQUIRED)
-            self.send_header('Proxy-Authenticate', 'Basic realm="HelloWorld"')
-            self.end_headers()
-        else:
-            # request_line => "CONNECT github.com:443 HTTP/1.1"
-            # path => 'github.com:443'
-            # host => 'github.com'
-            # top_domain_name => 'github.com'
-            host = self.path.split(':')[0]
-            top_domain_name = get_top_domain_name(host)
+        free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
+        if free_proxy_node_addr:
+            msg = 'Using free proxy node: ' + free_proxy_node_addr
+            logger.debug(msg)
 
-            free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
-            if free_proxy_node_addr:
-                msg = 'Using free proxy node: ' + free_proxy_node_addr
-                logger.debug(msg)
-
-                if self.server.server_info['service_mode'] == 'slot':
-                    self._do_CONNECT_slot_mode(free_proxy_node_addr)
-                else:
-                    self._do_CONNECT_node_mode()
+            if self.server.server_info['service_mode'] == 'slot':
+                self._do_CONNECT_slot_mode(free_proxy_node_addr)
             else:
-                self.send_response(httplib.SERVICE_UNAVAILABLE)
-                self.end_headers()
-            self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
+                self._do_CONNECT_node_mode()
+        else:
+            self.send_response(httplib.SERVICE_UNAVAILABLE)
+            self.end_headers()
+        self.connection.close()
+        self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
 
-            self.connection.close()
-
-        self.server.lock.acquire()
-        self.server.server_stat['waiting_requests'] -= 1
-        self.server.lock.release()
-            
     def _do_CONNECT_slot_mode(self, free_proxy_node_addr):
         host, port = free_proxy_node_addr.split(':')
         port = int(port)
@@ -380,18 +442,18 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 return
             raise ex
 
-        req = self.raw_requestline + str(self.headers) + '\r\n'
-        msg = 'Forward request from client %s to target %s: ' % (self.client_address_string, free_proxy_node_addr) + repr(req)
+        handler_obj = self.raw_requestline + str(self.headers) + '\r\n'
+        msg = 'Forward request from client %s to target %s: ' % (self.client_address_string, free_proxy_node_addr) + repr(handler_obj)
         logger.debug(msg)
-        sock_dst.sendall(req)
+        sock_dst.sendall(handler_obj)
 
-        data = helper_recv_until(sock_dst, '\r\n' * 2)
+        data = SocketHelper.recv_until(sock_dst, '\r\n' * 2)
         msg = 'Forward request from target %s to client %s: ' % (free_proxy_node_addr, self.client_address_string) + repr(data)
         logger.debug(msg)
 
         splits = data.rstrip('\r\n').split('\r\n')
-        first_line = splits[0]
-        splits = first_line.split(' ')
+        status_line = splits[0]
+        splits = status_line.split(' ')
         status_code = int(splits[1])
 
         if status_code != httplib.OK:
@@ -410,7 +472,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         
     def _do_CONNECT_node_mode(self, sock_dst=None):
         if not sock_dst:
-            host, port = self.path.split(':')
+            request_target = self.path
+            host, port = request_target.split(':')
             port = int(port)
 
             sock_dst = socket.socket()
@@ -452,7 +515,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         else:
                             raise ex
                     if data:
-                        remain = helper_send(sock_dst, data)
+                        remain = SocketHelper.send(sock_dst, data)
                         if remain:
                             msg = 'Client sent %d bytes to target, remain %d bytes' % (len(data), remain)
                             logger.debug(msg)
@@ -471,7 +534,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         else:
                             raise ex
                     if data:
-                        remain = helper_send(self.connection, data)
+                        remain = SocketHelper.send(self.connection, data)
                         if remain:
                             msg = 'Target sent %d bytes to client, remain %d bytes' % (len(data), remain)
                             logger.debug(msg)
@@ -519,18 +582,28 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return free_proxy_node_addr
 
-    def _do_OTHERS_node_mode(self, proxies=None, proxy_auth=None):
-        url = self.path
+    def _do_OTHERS_node_mode(self, free_proxy_node_addr=None, data=None, headers=None):
+        proxies = None
+        auth = None
+        if free_proxy_node_addr:
+            proxies = {"http" : "http://" + free_proxy_node_addr}
 
-        if proxy_auth:
-            auth = requests.auth.HTTPProxyAuth(*proxy_auth)
-        else:
-            auth = None
+            value = self.headers.getheader('proxy-authorization')
+            if value:
+                proxy_auth =  base64.decodestring(value.replace('Basic ', '').strip()).split(':')
+                auth = requests.auth.HTTPProxyAuth(*proxy_auth)
+            else:
+                auth = None
+
+        request_target = self.path
+        url = request_target
 
         try:
             r = getattr(requests, self.command.lower())(
                 url=url,
+                data=data,
                 proxies=proxies,
+                headers=headers,
                 timeout=float(self.server.server_settings['node_send_timeout_in_seconds']),
                 auth=auth)
 
@@ -559,23 +632,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         entry_body = r.content
         status_code = r.status_code
 
-        # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
-        hop_by_hop_headers_drop = (
-            'TE',
-            'Transfer-Encoding',
-            'Keep-Alive',
-            'Proxy-Authorization',
-            'Proxy-Authentication',
-            'Trailer',
-            'Upgrade',
-        )
 
-        headers_filtered = {}
-        for k in r.headers.keys():
-            if k.lower() not in (i.lower() for i in hop_by_hop_headers_drop):
-                headers_filtered[k] = r.headers[k]
+        headers_filtered = filter_hop_by_hop_headers(r.headers)
 
-        # TODO: we should not modified header 'Content-Encoding',
+        # TODO: We should not modified header 'Content-Encoding', fixed this in future.
         # because IETF standard said you should not, see also
         # http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-14#section-7.1.3.2
         if len(entry_body):
@@ -590,29 +650,13 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.end_headers()
 
         if self.command != 'HEAD' and \
-                        status_code >= 200 and \
-                        status_code not in (204, 304):
+                        status_code >= httplib.OK and \
+                        status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
             self.wfile.write(entry_body)
 
         self.server.lock.acquire()
         self.server.server_stat['proxy_requests'] += 1
         self.server.lock.release()
-
-    def _do_OTHERS_slot_mode(self, free_proxy_node_addr):
-        proxies = {"http" : "http://" + free_proxy_node_addr}
-        value = self.headers.getheader('proxy-authorization')
-        if value:
-            proxy_auth =  base64.decodestring(value.replace('Basic ', '').strip()).split(':')
-        else:
-            proxy_auth = None
-        self._do_OTHERS_node_mode(proxies=proxies, proxy_auth=proxy_auth)
-
-    def _check_proxy_auth(self):
-        value = self.headers.getheader('proxy-authorization')
-        if value:
-            if value.replace('Basic ', '').strip() == self.server.proxy_auth_base64:
-                return True
-        return False
 
 
 def test_http_proxy(lock, down_node_list, proxy_node_addr, proxy_auth, timeout):

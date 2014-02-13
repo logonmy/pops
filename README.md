@@ -86,14 +86,17 @@ Start it without authentication requirement
 
 ## See also
 
-Hypertext Transfer Protocol -- HTTP/1.0
+RFC 1945 - Hypertext Transfer Protocol -- HTTP/1.0
 http://tools.ietf.org/html/rfc1945
 
-Hypertext Transfer Protocol -- HTTP/1.1
+RFC 2616 - Hypertext Transfer Protocol -- HTTP/1.1
 http://tools.ietf.org/html/rfc2616
 
-Upgrading to TLS Within HTTP/1.1
+RFC 2817 - Upgrading to TLS Within HTTP/1.1
 http://tools.ietf.org/html/rfc2817
 
 Tunneling TCP based protocols through Web proxy servers
 https://tools.ietf.org/html/draft-luotonen-web-proxy-tunneling-01
+
+RFC 1867 - Form-based File Upload in HTML
+http://tools.ietf.org/html/rfc1867
