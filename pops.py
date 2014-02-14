@@ -75,7 +75,7 @@ def auth_required(func):
 
     @functools.wraps(func)
     def _wrapped(handler_obj, *args, **kwargs):          
-        if handler_obj.server.proxy_auth and not check_authorization(handler_obj):                    
+        if handler_obj.server.auth and not check_authorization(handler_obj):
             handler_obj.send_response(httplib.UNAUTHORIZED)
             handler_obj.send_header('WWW-Authenticate', 'Basic realm="HelloWorld"')
             handler_obj.end_headers()
@@ -339,38 +339,58 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.debug(format % args)
 
+    def helper_print_request(self):
+        print '*' * 40
+        print self.requestline
+        print self.headers
+        print '*' * 40
+
     def do_HEAD(self):
         return self.do_GET()
 
-    @request_stat_required
     def do_GET(self):
         parses = urlparse.urlparse(self.path)
         if parses.scheme and parses.netloc:
-            if self.server.server_info['service_mode'] == 'slot':
-                request_target = self.path
-                parses = urlparse.urlparse(request_target)
-                top_domain_name = get_top_domain_name(parses.netloc)
-                # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
-
-                free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
-                if free_proxy_node_addr:
-                    msg = 'Using free proxy node: ' + free_proxy_node_addr
-                    logger.debug(msg)
-                    self._do_OTHERS_node_mode(free_proxy_node_addr=free_proxy_node_addr)
-                else:
-                    msg = 'Free proxy node not found'
-                    self.send_response(httplib.SERVICE_UNAVAILABLE)
-                    self.end_headers()
-                self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
-            else:
-                self._do_OTHERS_node_mode()
+            # self.requestline => 'GET http://baidu.com HTTP/1.1'
+            # self.path => 'http://baidu.com'
+            # parses.scheme => 'http://'
+            # parses.netloc => 'baidu.com'
+            self._do_GET_no_admin()
         else:
-            map = dict(handler_list)
-            for path_in_re in map.keys():
-                left_slash_stripped = self.path[1:]
-                if re.compile(path_in_re).match(left_slash_stripped):
-                    return map[path_in_re](self)
-            self.send_error(httplib.NOT_FOUND)
+            # self.requestline => 'GET /stat/ HTTP/1.1'
+            self._do_GET_admin()
+
+    @request_stat_required
+    @proxy_auth_required
+    def _do_GET_no_admin(self):
+        if self.server.server_info['service_mode'] == 'slot':
+            request_target = self.path
+            parses = urlparse.urlparse(request_target)
+            top_domain_name = get_top_domain_name(parses.netloc)
+            # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
+
+            free_proxy_node_addr = self._proxy_server_incr_concurrency('http://' + top_domain_name, step=1)
+            if free_proxy_node_addr:
+                msg = 'Using free proxy node: ' + free_proxy_node_addr
+                logger.debug(msg)
+                self._do_OTHERS_node_mode(free_proxy_node_addr=free_proxy_node_addr)
+            else:
+                msg = 'Free proxy node not found'
+                logger.debug(msg)
+                self.send_response(httplib.SERVICE_UNAVAILABLE)
+                self.end_headers()
+            self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
+        else:
+            self._do_OTHERS_node_mode()
+
+    @auth_required
+    def _do_GET_admin(self):
+        map = dict(handler_list)
+        for path_in_re in map.keys():
+            left_slash_stripped = self.path[1:]
+            if re.compile(path_in_re).match(left_slash_stripped):
+                return map[path_in_re](self)
+        self.send_error(httplib.NOT_FOUND)
 
     @request_stat_required
     @proxy_auth_required
