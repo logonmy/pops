@@ -401,7 +401,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         entry_body_length = int(self.headers.getheader('content-length', 0))
         content_type, ct_parameters_dict = cgi.parse_header(self.headers.getheader('content-type'))
         if entry_body_length:
-            ignore_header_list = {'Host'}
+            ignore_header_list = set(['Host'])
             filtered_headers_in_d = filter_hop_by_hop_headers(self.headers, ignore_header_list)
 
             # always rewrite it
@@ -746,7 +746,7 @@ def check_proxy_list(httpd_inst):
             httpd_inst.lock.release()
 
 
-            down_node_list = {}
+            down_node_list = set()
             node_test_max_concurrency = int(httpd_inst.server_settings['node_test_max_concurrency'])
 
             time_s = time.time()
