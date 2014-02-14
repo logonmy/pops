@@ -300,23 +300,26 @@ def filter_hop_by_hop_headers(headers, ignore_header_list=None):
         'Trailer',
         'Upgrade',
     )
-    drop_headers_list = set(i.lower() for i in HOP_BY_HOP_HEADERS)
+    drop_headers_in_lower_list = set(i.lower() for i in HOP_BY_HOP_HEADERS)
     if ignore_header_list:
-        drop_headers_list = drop_headers_list.union(set(ignore_header_list))
+        ignore_header_in_lower_list = set(i.lower() for i in ignore_header_list)
+        drop_headers_in_lower_list = drop_headers_in_lower_list.union(ignore_header_in_lower_list)
     headers_filtered = {}
     for k in headers.keys():
-        if k.lower() not in drop_headers_list:
+        if k.lower() not in drop_headers_in_lower_list:
             headers_filtered[k] = headers[k]
     return headers_filtered
 
-def fix_post_vars(post_vars):
-    data = {}
-    for k, v in post_vars.iteritems():
-        if len(v) == 1:
-            data[k] = v[0].strip()
-        else:
-            data[k] = v
-    return data
+def drop_header_by_name(headers_filtered, name):
+    drop_list = []
+    for i in headers_filtered:
+        if i.lower() == name.lower():
+            drop_list.append(i)
+    new_headers = {}
+    for k in headers_filtered.keys():
+        if k not in drop_list:
+            new_headers[k] = headers_filtered[k]
+    return new_headers
 
 
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -395,11 +398,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     @request_stat_required
     @proxy_auth_required
     def do_POST(self):
-        print '*' * 40
-        print self.requestline
-        print self.headers
-        print '*' * 40
-
         entry_body_length = int(self.headers.getheader('content-length', 0))
         content_type, ct_parameters_dict = cgi.parse_header(self.headers.getheader('content-type'))
         if entry_body_length:
@@ -666,11 +664,15 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # because IETF standard said you should not, see also
         # http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-14#section-7.1.3.2
         if len(entry_body):
-            if 'content-encoding' in headers_filtered:
-                headers_filtered.pop('content-encoding')
-            headers_filtered['content-length'] = len(entry_body)
+            headers_filtered_in_lower_list = set(i.lower() for i in headers_filtered)
+            if 'Content-Encoding'.lower() in headers_filtered_in_lower_list:
+                headers_filtered = drop_header_by_name(headers_filtered, 'Content-Encoding')
 
+            headers_filtered = drop_header_by_name(headers_filtered, 'Content-Length')
+            headers_filtered['Content-Length'] = len(entry_body)
 
+        # FIXME: filter duplicated headers
+        # TODO: filter duplicated headers
         self.send_response(status_code)
         for k in headers_filtered.keys():
             self.send_header(k, headers_filtered[k])
