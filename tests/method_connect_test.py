@@ -1,6 +1,5 @@
 import unittest
 import httplib
-import httplib2
 
 import requests
 import requests.auth
@@ -10,8 +9,6 @@ import config
 
 auth = requests.auth.HTTPBasicAuth(config.username, config.password)
 proxy_auth = requests.auth.HTTPProxyAuth(config.proxy_username, config.proxy_password)
-PROXY_TYPE_HTTP = 3
-proxy_info = httplib2.ProxyInfo(proxy_type=PROXY_TYPE_HTTP, proxy_host='127.0.0.1', proxy_port=1080, proxy_user='god', proxy_pass='hidemyass')
 
 
 class TestMethodCONNECT(unittest.TestCase):

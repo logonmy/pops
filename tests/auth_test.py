@@ -55,10 +55,9 @@ class TestAuth(unittest.TestCase):
             status_code, reason = ex.args[0][0], ex.args[0][1]
             self.assertEqual(status_code, httplib.PROXY_AUTHENTICATION_REQUIRED)
 
-
-        h = httplib2.Http(disable_ssl_certificate_validation=True, proxy_info=proxy_info)
-        headers, entry_body = h.request(url, 'GET')
-        status_code = int(headers['status'])
+        r = requests.get(url=url, proxies=config.proxies_with_auth)
+        status_code = r.status_code
+        entry_body = r.text
 
         self.assertEqual(status_code, httplib.OK)
         self.assertTrue(len(entry_body))

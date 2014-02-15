@@ -342,6 +342,28 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         logger.debug(format % args)
 
+    def send_response(self, code, message=None, send_header_server=False, send_header_date=False):
+        """Send the response header and log the response code.
+
+        Also send two standard headers with the server software
+        version and the current date.
+
+        """
+        self.log_request(code)
+        if message is None:
+            if code in self.responses:
+                message = self.responses[code][0]
+            else:
+                message = ''
+        if self.request_version != 'HTTP/0.9':
+            self.wfile.write("%s %d %s\r\n" %
+                             (self.protocol_version, code, message))
+
+        if send_header_server:
+            self.send_header('Server', self.version_string())
+        if send_header_date:
+            self.send_header('Date', self.date_time_string())
+
     def helper_print_request(self):
         print '*' * 40
         print self.requestline
