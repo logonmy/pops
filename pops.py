@@ -433,18 +433,20 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         host = request_target.split(':')[0]
         top_domain_name = get_top_domain_name(host)
 
-        free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
-        if free_proxy_node_addr:
-            msg = 'Using free proxy node: ' + free_proxy_node_addr
-            logger.debug(msg)
+        if self.server.server_info['service_mode'] == 'slot':
+            free_proxy_node_addr = self._proxy_server_incr_concurrency('https://' + top_domain_name, step=1)
+            if free_proxy_node_addr:
+                msg = 'Using free proxy node: ' + free_proxy_node_addr
+                logger.debug(msg)
 
-            if self.server.server_info['service_mode'] == 'slot':
                 self._do_CONNECT_slot_mode(free_proxy_node_addr)
             else:
-                self._do_CONNECT_node_mode()
+                msg = 'Free proxy node not found'
+                logger.debug(msg)
+                self.send_response(httplib.SERVICE_UNAVAILABLE)
+                self.end_headers()
         else:
-            self.send_response(httplib.SERVICE_UNAVAILABLE)
-            self.end_headers()
+            self._do_CONNECT_node_mode()
 
         conn_type = self.headers.get('Connection', "")
         if (conn_type.lower() != 'keep-alive' and self.protocol_version < "HTTP/1.1"):
