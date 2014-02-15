@@ -200,20 +200,20 @@ def admin(handler_obj):
         handler_obj.send_error(httplib.NOT_FOUND)
         return
 
-    if parse.path in ['/admin/proxy/add', '/admin/proxy/reset']:
+    if parse.path in ['/admin/node/add', '/admin/node/reset']:
         addr_list = [i.strip() for i in qs_in_d['addr'][0].split(',')]
 
         handler_obj.server.lock.acquire()
         my_proxy_list = copy.deepcopy(handler_obj.server.proxy_list)
 
         for new_proxy_sever in addr_list:
-            if parse.path == '/admin/proxy/add':
+            if parse.path == '/admin/node/add':
                 if new_proxy_sever not in my_proxy_list:
                     my_proxy_list[new_proxy_sever] = {
                         '_status': ProxyNodeStatus.UP_AND_RUNNING,
                     }
                 handler_obj.log_message('Appended %s into proxy list' % new_proxy_sever)
-            elif parse.path == '/admin/proxy/reset':
+            elif parse.path == '/admin/node/reset':
                 if new_proxy_sever in my_proxy_list:
                     my_proxy_list[new_proxy_sever] = {
                         '_status': ProxyNodeStatus.UP_AND_RUNNING,
@@ -228,7 +228,7 @@ def admin(handler_obj):
         return
 
 
-    elif parse.path == '/admin/proxy/delete':
+    elif parse.path == '/admin/node/delete':
         addr_list = set([i.strip() for i in qs_in_d['addr'][0].split(',')])
 
         handler_obj.server.lock.acquire()
