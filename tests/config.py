@@ -6,6 +6,11 @@ proxies = {
     'https': 'http://127.0.0.1:1080'
 }
 
+proxies_with_auth = {
+    'http': 'http://god:hidemyass@127.0.0.1:1080',
+    'https': 'http://god:hidemyass@127.0.0.1:1080'
+}
+
 node_add = '127.0.0.1:8118'
 node_b_add = '127.0.0.1:8119'
 

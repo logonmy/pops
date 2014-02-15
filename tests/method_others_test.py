@@ -32,13 +32,13 @@ class TestMethodOthers(unittest.TestCase):
             assert r.status_code == httplib.OK
 
     def test_method_head(self):
-        r = requests.head('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.head('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.OK)
         self.assertNotIn('proxy-authenticate', r.headers)
         self.assertEqual(r.text, '')
 
     def test_method_get(self):
-        r = requests.get('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.get('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.OK)
         self.assertNotIn('proxy-authenticate', r.headers)
         self.assertNotEqual(r.text, '')

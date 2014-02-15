@@ -29,32 +29,32 @@ class TestSlot(unittest.TestCase):
             assert r.status_code == httplib.OK
 
     def test_slot_one_node_method_head(self):
-        r = requests.head('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.head('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.SERVICE_UNAVAILABLE)
 
         url_add_node = config.URL_ADMIN + '/node/add?addr=' + config.node_add
         r = requests.get(url=url_add_node, auth=auth)
         self.assertEqual(r.status_code, httplib.OK)
 
-        r = requests.head('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.head('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.OK)
 
     def test_slot_one_node_method_get(self):
-        r = requests.get('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.get('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.SERVICE_UNAVAILABLE)
 
         url_add_node = config.URL_ADMIN + '/node/add?addr=' + config.node_add
         r = requests.get(url=url_add_node, auth=auth)
         self.assertEqual(r.status_code, httplib.OK)
 
-        r = requests.get('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.get('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.OK)
 
     def test_slot_multiple_nodes(self):
-        r = requests.head('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.head('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.SERVICE_UNAVAILABLE)
 
-        r = requests.get('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.get('http://baidu.com', proxies=config.proxies_with_auth)
         self.assertEqual(r.status_code, httplib.SERVICE_UNAVAILABLE)
 
         url_add_node = config.URL_ADMIN + '/node/add?addr=' + config.node_add
@@ -80,7 +80,7 @@ class TestSlot(unittest.TestCase):
 
     @staticmethod
     def _test_get(self, lock, stat):
-        r = requests.get('http://baidu.com', proxies=config.proxies, auth=proxy_auth)
+        r = requests.get('http://baidu.com', proxies=config.proxies_with_auth)
         lock.acquire()
         stat[r.status_code] += 1
         lock.release()

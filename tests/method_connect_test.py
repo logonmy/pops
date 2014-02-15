@@ -36,18 +36,18 @@ class TestMethodCONNECT(unittest.TestCase):
 
     def test_method_head(self):
         url = 'https://github.com'
-        h = httplib2.Http(disable_ssl_certificate_validation=True, proxy_info=proxy_info)
-        headers, entry_body = h.request(url, 'HEAD')
-        status_code = int(headers['status'])
+        r = requests.head(url=url, verify=False, proxies=config.proxies_with_auth)
+        status_code = r.status_code
+        entry_body = r.text
 
         self.assertEqual(status_code, httplib.OK)
         self.assertEqual(entry_body, '')
 
     def test_method_get(self):
         url = 'https://github.com'
-        h = httplib2.Http(disable_ssl_certificate_validation=True, proxy_info=proxy_info)
-        headers, entry_body = h.request(url, 'GET')
-        status_code = int(headers['status'])
+        r = requests.get(url=url, verify=False, proxies=config.proxies_with_auth)
+        status_code = r.status_code
+        entry_body = r.text
 
         self.assertEqual(status_code, httplib.OK)
         self.assertTrue(len(entry_body))
