@@ -746,7 +746,7 @@ def check_proxy_list(httpd_inst):
             httpd_inst.lock.release()
 
 
-            down_node_list = set()
+            down_node_list = dict()
             node_test_max_concurrency = int(httpd_inst.server_settings['node_test_max_concurrency'])
 
             time_s = time.time()
