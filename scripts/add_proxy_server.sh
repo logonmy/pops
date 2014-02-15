@@ -1,14 +1,19 @@
 #!/usr/bin/env bash
 
-config_path=$1
+slot_addr=$1
+node_addr=$2
 
-if [ "$config_path" = "" ];then
-	echo "Usage $0: <config_path>"
+if [ "$slot_addr" = "" ] || [ "$node_addr" = "" ] ;then
+	echo "Usage $0: <slot_addr> <node_addr file or string>"
 	exit 0
 fi
 
-for i in `cat $config_path |grep -v ^$|grep -v '#'`;do
-    curl --basic -u 'god:hidemyass' "http://127.0.0.1:1080/admin/proxy/add?addr=$i"
-done 
+if [ -f $node_addr ]; then
+    for i in `cat $node_addr |grep -v ^$|grep -v '#'`;do
+        curl --basic --user 'god:hidemyass' "http://$slot_addr/admin/node/add?addr=$i"
+    done
+else
+    curl --basic --user 'god:hidemyass' "http://$slot_addr/admin/node/add?addr=$node_addr"
+fi
 
 exit 0

@@ -51,8 +51,8 @@ Show stat info
 
 Add nodes
 
-    curl --basic -u 'god:hidemyass' http://127.0.0.1:1080/admin/proxy/add?addr=127.0.0.1:3128
-    curl --basic -u 'god:hidemyass' http://127.0.0.1:1080/admin/proxy/add?addr=192.168.1.100:9090
+    curl --basic -u 'god:hidemyass' http://127.0.0.1:1080/admin/node/add?addr=127.0.0.1:3128
+    curl --basic -u 'god:hidemyass' http://127.0.0.1:1080/admin/node/add?addr=192.168.1.100:9090
 
 
 Update settings

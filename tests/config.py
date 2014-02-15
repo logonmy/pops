@@ -7,11 +7,10 @@ proxies = {
 }
 
 node_add = '127.0.0.1:8118'
+node_b_add = '127.0.0.1:8119'
 
 username = 'god'
 password = 'hidemyass'
 proxy_username = 'god'
 proxy_password = 'hidemyass'
 
-
-import httplib
