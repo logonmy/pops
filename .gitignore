@@ -1,0 +1,12 @@
+.DS_Store
+.idea/
+build/
+dist/
+*.egg-info
+*.log
+t.*
+*.pyc
+*.pyo
+*.txt
+*.pid
+scripts/delegated-apnic-latest
