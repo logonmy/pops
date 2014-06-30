@@ -29,14 +29,19 @@ Features
 
 ## Install and Usage
 
-Install
+Install requirements
+
+    sudo pip install -r requirements.txt
+
+
+Install script
 
     sudo python setup.py install
 
 
 ### HTTP proxy server
 
-    pops.py --port 1080
+    python pops.py --port 1080
     curl -v --proxy-basic --proxy-user 'god:hidemyass' --proxy 127.0.0.1:1080  http://www.imdb.com/title/tt0108778/
 
 Show stat info
@@ -46,7 +51,7 @@ Show stat info
 
 ### HTTP proxy slot server
 
-    pops.py --mode slot --port 1080
+    python pops.py --mode slot --port 1080
 
 
 Add nodes
