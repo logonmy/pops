@@ -3,7 +3,7 @@ from distutils.core import setup
 
 setup(
     name='pypops',
-    version='201401',
+    version='201408',
     packages=[''],
     url='https://github.com/shuge/pops',
     license='MIT License',
