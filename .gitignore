@@ -9,3 +9,4 @@ t.*
 *.txt
 *.pid
 scripts/delegated-apnic-latest
+MANIFEST
