@@ -112,7 +112,7 @@ def local_net_required(func):
         if handler_obj.server.server_name in ALLOW_HOSTS:
             return func(handler_obj)
         else:
-            handler_obj.send_error(code=httplib.FORBIDDEN, message='allow local net only')
+            handler_obj.send_error(code=httplib.FORBIDDEN, message='allow local hostname %s only' % ','.join(ALLOW_HOSTS))
             return
     return _wrapped_view
 
@@ -878,9 +878,9 @@ def main(args):
 
     httpd_inst.server_stat = mp_manager.dict({
         'waiting_requests': 0,
-        'proxy_requests': 0,
-        'forward_requests': 0,
-        'requests': 0,
+        'proxy_requests': 0, # total HTTP proxy request
+        'forward_requests': 0, # total HTTPS CONNECT request
+        'requests': 0, # total requests
     })
 
     # READ-ONLY info
