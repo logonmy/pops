@@ -28,13 +28,25 @@ import requests.exceptions
 import select
 
 
-__version__ = "201401"
+__version__ = "201408"
 
 
 logging.basicConfig(format='%(asctime)s [%(levelname)s] [%(process)d] %(message)s',
                     datefmt='%Y-%m-%d %I:%M:%S',
                     level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+
+# http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
+HOP_BY_HOP_HEADERS = (
+    'TE',
+    'Transfer-Encoding',
+    'Keep-Alive',
+    'Proxy-Authorization',
+    'Proxy-Authentication',
+    'Trailer',
+    'Upgrade',
+)
 
 
 class SocketHelper(object):
@@ -57,6 +69,69 @@ class SocketHelper(object):
                 break
             data += buf
         return data
+
+
+def contains(iterable, element):
+    for i in iterable:
+        if i.lower() == element:
+            return True
+    return False
+
+class HTTPHeadersCaseSensitive(object):
+    """
+    I would like to keep it as origin in case sensitive,
+    although RFC2616 said 'Field names are case-insensitive.'
+    http://tools.ietf.org/html/rfc2616#section-4.2
+    """
+
+    def __init__(self, lines):
+        self.headers = []
+        self.parse_headers(lines) 
+
+    def merge_field_value(self, k, v):
+        for item in self.headers:
+            if item[0].lower() == k.lower():
+                item[1] = item[1] + ', ' + v
+                break
+
+    def parse_headers(self, lines):
+        field_name_list = set()
+        for line in lines:
+            first_semicolon = line.index(':')
+            k, v = line[:first_semicolon], line[first_semicolon + 1:].strip()
+            if k.lower() in field_name_list:
+                self.merge_field_value(k, v)
+            else:
+                field_name_list.add(k.lower())
+                item = [k, v]
+                self.headers.append(item)
+
+    def get_value(self, name):
+        for item in self.headers:
+            if item[0].lower() == name.lower():
+                return item[1]
+
+    def filter_headers(self, headers):
+        field_name_list = set()
+        new_headers = []
+
+        for item in self.headers:
+            name = item[0].lower()
+            if not contains(headers, name):
+                field_name_list.add(name)
+                new_headers.append(item)
+        self.headers = new_headers
+
+    def add_header(self, name, value, override=False):
+        for item in self.headers:
+            if item[0].lower() == name.lower():
+                if override:
+                    item[1] = value
+                else:
+                    item[1] += ', ' + value
+                break
+        item = (name, value)
+        self.headers.append(item)
 
 
 class ProxyNodeStatus(object):
@@ -112,7 +187,8 @@ def local_net_required(func):
         if handler_obj.server.server_name in ALLOW_HOSTS:
             return func(handler_obj)
         else:
-            handler_obj.send_error(code=httplib.FORBIDDEN, message='allow local hostname %s only' % ','.join(ALLOW_HOSTS))
+            msg = 'allow local hostname %s only' % ','.join(ALLOW_HOSTS)
+            handler_obj.send_error(code=httplib.FORBIDDEN, message=msg)
             return
     return _wrapped_view
 
@@ -120,8 +196,12 @@ def request_stat_required(func):
     @functools.wraps(func)
     def _wrapped(handler_obj, *args, **kwargs):
         handler_obj.server.lock.acquire()
-        handler_obj.server.server_stat['requests'] += 1
-        handler_obj.server.server_stat['waiting_requests'] += 1
+        if handler_obj.server.server_info['service_mode'] == 'slot':
+            handler_obj.server.stat_slot['requests'] += 1
+            handler_obj.server.stat_slot['processing'] += 1
+        else:
+            handler_obj.server.stat_node['requests'] += 1
+            handler_obj.server.stat_node['processing'] += 1
         handler_obj.server.lock.release()
 
         try:
@@ -132,7 +212,10 @@ def request_stat_required(func):
             handler_obj.send_error(httplib.INTERNAL_SERVER_ERROR)
 
         handler_obj.server.lock.acquire()
-        handler_obj.server.server_stat['waiting_requests'] -= 1
+        if handler_obj.server.server_info['service_mode'] == 'slot':
+            handler_obj.server.stat_slot['processing'] -= 1
+        else:
+            handler_obj.server.stat_node['processing'] -= 1
         handler_obj.server.lock.release()
         return r
     return _wrapped
@@ -142,10 +225,13 @@ def default_body(handler_obj):
     handler_obj.send_header('Content-Type', 'text/html; charset=utf-8')
     handler_obj.end_headers()
 
-    entry_body = "<html><head><title>Welcome to POPS!</title></head><body>" \
-                   "<h1>Welcome to POPS!</h1>" \
-                    "</html>\n"
-    handler_obj.wfile.write(entry_body)
+    chunks = [
+        "<html><head><title>Welcome to POPS!</title></head><body>",
+        "<h1>Welcome to POPS!</h1>",
+        "<p><a href=\"https://github.com/shuge/pops/wiki\">documentation</a>",
+        "</body></html>\n",
+    ]
+    handler_obj.wfile.write("".join(chunks))
 
 def favicon(handler_obj):
     handler_obj.send_error(httplib.NOT_FOUND)
@@ -159,30 +245,31 @@ def stat(handler_obj):
 
 
     handler_obj.server.lock.acquire()
-    proxy_list_d = copy.deepcopy(handler_obj.server.proxy_list)
+    proxy_list = copy.deepcopy(handler_obj.server.proxy_list)
     handler_obj.server.lock.release()
 
     total_up_nodes = 0
-    for proxy_node_addr in proxy_list_d.keys():
-        if proxy_list_d[proxy_node_addr]['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
+    for proxy_node_addr in proxy_list.keys():
+        if proxy_list[proxy_node_addr]['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
             total_up_nodes += 1
 
-    server_stat_d = copy.deepcopy(handler_obj.server.server_stat)
-    server_stat_d['total_up_nodes'] = total_up_nodes
+    stat_slot = copy.deepcopy(handler_obj.server.stat_slot)
+    stat_slot['total_up_nodes'] = total_up_nodes
+    stat_slot['total_nodes'] = len(proxy_list.keys())
 
-    server_stat_d['total_nodes'] = len(proxy_list_d.keys())
+    stat_node = copy.deepcopy(handler_obj.server.stat_node)
 
+    server_info = copy.deepcopy(handler_obj.server.server_info)
 
-    server_info_d = copy.deepcopy(handler_obj.server.server_info)
-
-    server_settings_d = copy.deepcopy(handler_obj.server.server_settings)
+    settings = copy.deepcopy(handler_obj.server.settings)
 
 
     migrated = {
-        'server_info': server_info_d,
-        'server_stat': server_stat_d,
-        'server_settings': server_settings_d,
-        'proxy_list': proxy_list_d,
+        'server_info': server_info,
+        'stat_slot': stat_slot,
+        'stat_node': stat_node,
+        'settings': settings,
+        'proxy_list': proxy_list,
     }
     entry_body = json.dumps(migrated, indent=2) + "\n"
 
@@ -246,12 +333,12 @@ def admin(handler_obj):
         handler_obj.send_response(httplib.OK)
         return
 
-    elif parse.path == '/admin/server_settings/update':
+    elif parse.path == '/admin/settings/update':
         k, v = qs_in_d['k'][0], qs_in_d['v'][0]
 
         handler_obj.server.lock.acquire()
-        if k in handler_obj.server.server_settings:
-            handler_obj.server.server_settings[k] = v
+        if k in handler_obj.server.settings:
+            handler_obj.server.settings[k] = v
         handler_obj.server.lock.release()
 
         handler_obj.send_response(httplib.OK)
@@ -290,22 +377,13 @@ def get_top_domain_name(s):
         raise ValueError
 
 def filter_hop_by_hop_headers(headers, ignore_header_list=None):
-    # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
-    HOP_BY_HOP_HEADERS = (
-        'TE',
-        'Transfer-Encoding',
-        'Keep-Alive',
-        'Proxy-Authorization',
-        'Proxy-Authentication',
-        'Trailer',
-        'Upgrade',
-    )
     drop_headers_in_lower_list = set(i.lower() for i in HOP_BY_HOP_HEADERS)
     if ignore_header_list:
         ignore_header_in_lower_list = set(i.lower() for i in ignore_header_list)
         drop_headers_in_lower_list = drop_headers_in_lower_list.union(ignore_header_in_lower_list)
+
     headers_filtered = {}
-    for k in headers.keys():
+    for k in headers:
         if k.lower() not in drop_headers_in_lower_list:
             headers_filtered[k] = headers[k]
     return headers_filtered
@@ -322,6 +400,62 @@ def drop_header_by_name(headers_filtered, name):
     return new_headers
 
 
+class Helper(object):
+
+    MAX_LONG = 64
+
+    @staticmethod
+    def cut_long_str_for_human(s):
+        s_len = len(s)
+        if s_len <= Helper.MAX_LONG:
+            return s
+        else:
+            return '%s...< %d bytes >...%s' % (s[:5], s_len - 10, s[-5:])
+
+
+    @staticmethod
+    def print_d(post_vars, cut=False):
+        chunks = []
+        for name in post_vars:
+            if len(post_vars[name]) == 1:
+                v = post_vars[name][0]
+                if cut:
+                    v_fixed = Helper.cut_long_str_for_human(v)
+                else:
+                    v_fixed = v
+                chunk = '%s=%s' % (name, v_fixed)
+                chunks.append(chunk)
+            else:
+                chunks = []
+                for v in post_vars[name]:
+                    if cut:
+                        v_fixed = Helper.cut_long_str_for_human(v)
+                    else:
+                        v_fixed = v
+                    chunk = '%s=%s' % (name, v_fixed)
+                    chunks.append(chunk)
+        for chunk in chunks[:-1]:
+            print repr('%s&' % chunk)
+        print repr(chunks[-1])
+
+    @staticmethod
+    def print_request(req_handler):
+        print repr(req_handler.raw_requestline)
+        for line in req_handler.headers.headers:
+            print repr(line)
+
+    @staticmethod
+    def print_urlencoded_entry_body(body):
+        post_vars = urlparse.parse_qs(body, keep_blank_values=1)
+        Helper.print_d(post_vars)
+
+    @staticmethod
+    def print_multipart_entry_body(body, parameters_dict):
+        fp = StringIO.StringIO(body)
+        post_vars = cgi.parse_multipart(fp, parameters_dict)
+        Helper.print_d(post_vars, cut=True)
+
+
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
     server_version = "POPS/" + __version__
@@ -334,6 +468,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # server will auto terminate it.
         # See also: http://yyz.us/bitcoin/poold.py
         self.request.settimeout(3)
+
+        self.headers_case_sensitive = None
 
     @property
     def client_address_string(self):
@@ -364,25 +500,20 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         if send_header_date:
             self.send_header('Date', self.date_time_string())
 
-    def helper_print_request(self):
-        print '*' * 40
-        print self.requestline
-        print self.headers
-        print '*' * 40
-
     def do_HEAD(self):
         return self.do_GET()
 
     def do_GET(self):
+        # Helper.print_request(self)
+        self.headers_case_sensitive = HTTPHeadersCaseSensitive(self.headers.headers)
+
         parses = urlparse.urlparse(self.path)
         if parses.scheme and parses.netloc:
-            # self.requestline => 'GET http://baidu.com HTTP/1.1'
             # self.path => 'http://baidu.com'
             # parses.scheme => 'http://'
             # parses.netloc => 'baidu.com'
             self._do_GET_no_admin()
         else:
-            # self.requestline => 'GET /stat/ HTTP/1.1'
             self._do_GET_admin()
 
     @request_stat_required
@@ -406,7 +537,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.end_headers()
             self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
         else:
-            self._do_OTHERS_node_mode()
+            # self._do_OTHERS_node_mode()
+            self._do_GET_no_admin_node()
 
     @auth_required
     def _do_GET_admin(self):
@@ -420,39 +552,39 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     @request_stat_required
     @proxy_auth_required
     def do_POST(self):
-        entry_body_length = int(self.headers.getheader('content-length', 0))
-        content_type, ct_parameters_dict = cgi.parse_header(self.headers.getheader('content-type'))
-        if entry_body_length:
-            ignore_header_list = set(['Host'])
-            filtered_headers_in_d = filter_hop_by_hop_headers(self.headers, ignore_header_list)
+        # Helper.print_request(self)
+        self.headers_case_sensitive = HTTPHeadersCaseSensitive(self.headers.headers)
 
-            # always rewrite it
-            # http://tools.ietf.org/html/rfc2616#section-14.23
-            # http://tools.ietf.org/html/rfc2616#section-5.2
-            # http://tools.ietf.org/html/rfc2616#section-19.6.1.1
-            request_target = self.path
-            parses = urlparse.urlparse(request_target)
-            filtered_headers_in_d['Host'] = parses.netloc
+        entry_body_length = int(self.headers.get('content-length', 0))
 
-            if content_type == 'application/x-www-form-urlencoded':
-                entry_body = self.rfile.read(entry_body_length)
-                post_vars = urlparse.parse_qs(entry_body, keep_blank_values=1)
-                self._do_OTHERS_node_mode(data=post_vars, headers=filtered_headers_in_d)
-                return
-            elif content_type == 'multipart/form-data':
-                # post_vars = cgi.parse_multipart(self.rfile, ct_parameters_dict)
-                # print 'post_vars', post_vars
-                # self._do_OTHERS_node_mode(data=post_vars, headers=filtered_headers_in_d)
-                # return
-                self.send_error(httplib.NOT_IMPLEMENTED)
-                return
-        self._do_OTHERS_node_mode()
+        content_type, parameters_dict = cgi.parse_header(self.headers.get('content-type'))
+        # parsing 'Content-Type: multipart/form-data; boundary=----------------------------de57d505f7e3\r\n'
+        # content_type = 'multipart/form-data'
+        # parameters_dict = {'boundary': '----------------------------de57d505f7e3'}
+
+        # We always rewrite Host field.
+        # http://tools.ietf.org/html/rfc2616#section-14.23
+        # http://tools.ietf.org/html/rfc2616#section-5.2
+        # http://tools.ietf.org/html/rfc2616#section-19.6.1.1
+        request_target = self.path
+        parses = urlparse.urlparse(request_target)
+        self.headers_case_sensitive.add_header('Host', parses.netloc, override=True)
+
+        entry_body = self.rfile.read(entry_body_length)
+        if content_type == 'application/x-www-form-urlencoded':
+            # Helper.print_urlencoded_entry_body(entry_body)
+            self._do_GET_no_admin_node(body=entry_body)
+            return
+        elif content_type == 'multipart/form-data':
+            # Helper.print_multipart_entry_body(entry_body, parameters_dict)
+            self._do_GET_no_admin_node(body=entry_body)
+            return
 
     @request_stat_required
     @proxy_auth_required
     def do_CONNECT(self):
-        request_target = self.path
-        host = request_target.split(':')[0]
+        # Helper.print_request(self)
+        host = self.path.split(':')[0]
         top_domain_name = get_top_domain_name(host)
 
         if self.server.server_info['service_mode'] == 'slot':
@@ -592,7 +724,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         sock_dst_shutdown = True
 
         self.server.lock.acquire()
-        self.server.server_stat['forward_requests'] += 1
+        self.server.stat_node['forward_requests'] += 1
         self.server.lock.release()
 
     def _proxy_server_incr_concurrency(self, top_domain_name, step=1):
@@ -608,7 +740,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 concurrency = domain_name_map.get(top_domain_name, 0)
                 # this proxy allow to crawl records from this domain name in concurrency mode
                 if step > 0:
-                    if (concurrency < int(self.server.server_settings['node_per_domain_max_concurrency'])) and \
+                    if (concurrency < int(self.server.settings['node_per_domain_max_concurrency'])) and \
                             (int(domain_name_map['_status']) > ProxyNodeStatus.DELETED_OR_DOWN):
                         if top_domain_name in domain_name_map:
                             my_proxy_list[proxy_node_addr][top_domain_name] += step
@@ -653,7 +785,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 data=data,
                 proxies=proxies,
                 headers=headers,
-                timeout=float(self.server.server_settings['node_send_timeout_in_seconds']),
+                timeout=float(self.server.settings['node_send_timeout_in_seconds']),
                 auth=auth)
 
         except requests.exceptions.Timeout:
@@ -708,8 +840,61 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.wfile.write(entry_body)
 
         self.server.lock.acquire()
-        self.server.server_stat['proxy_requests'] += 1
+        if self.server.server_info['service_mode'] == 'slot':
+            self.server.stat_slot['proxy_requests'] += 1
+        else:
+            self.server.stat_node['proxy_requests'] += 1
         self.server.lock.release()
+
+    def _do_GET_no_admin_node(self, body=None):
+        assert self.path.startswith('http://')
+
+        splits = self.headers.get('Host').split(':')
+        if len(splits) == 2:
+            host, port = splits[0], int(splits[1])
+        else:
+            host, port = splits[0], 80
+
+        OTHERS_DROP_HEADERS = ('Proxy-Connection', )
+        self.headers_case_sensitive.filter_headers(HOP_BY_HOP_HEADERS + OTHERS_DROP_HEADERS)
+        self.headers_case_sensitive.add_header(name='Connection', value='Close', override=True)
+
+        httplib.HTTPConnection.debuglevel = 1
+        conn = httplib.HTTPConnection(host=host,
+                                      port=port,
+                                      timeout=self.server.settings['node_send_timeout_in_seconds'])
+        conn.request(method=self.command,
+                     url=self.path,
+                     body=body,
+                     headers=dict(self.headers_case_sensitive.headers))
+
+
+
+        resp = conn.getresponse()
+        status_code = resp.status
+
+        self.send_response(status_code)
+
+        for line in resp.msg.headers:
+            first_semicolon = line.index(':')
+            k, v = line[:first_semicolon], line[first_semicolon + 1:].strip()
+            self.send_header(k, v)
+        self.end_headers()
+
+        entry_body = resp.read()
+        if self.command != 'HEAD' and \
+                        status_code >= httplib.OK and \
+                        status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
+            self.wfile.write(entry_body)
+
+        self.server.lock.acquire()
+        if self.server.server_info['service_mode'] == 'slot':
+            self.server.stat_slot['proxy_requests'] += 1
+        else:
+            self.server.stat_node['proxy_requests'] += 1
+        self.server.lock.release()
+
+        # For custom request logging, see BaseHTTPServer.py:414:log_request
 
 
 def test_http_proxy(down_node_list, proxy_node_addr, proxy_auth, timeout, lock=None):
@@ -771,7 +956,7 @@ def check_proxy_list(httpd_inst):
 
 
             down_node_list = dict()
-            node_test_max_concurrency = int(httpd_inst.server_settings['node_test_max_concurrency'])
+            node_test_max_concurrency = int(httpd_inst.settings['node_test_max_concurrency'])
 
             time_s = time.time()
             logger.debug('Test proxy nodes started, node_test_max_concurrency = %d' % node_test_max_concurrency)
@@ -785,7 +970,7 @@ def check_proxy_list(httpd_inst):
                                   down_node_list=down_node_list,
                                   proxy_node_addr=proxy_node_parts[idx],
                                   proxy_auth=httpd_inst.proxy_auth,
-                                  timeout=float(httpd_inst.server_settings['node_kick_slow_than']))
+                                  timeout=float(httpd_inst.settings['node_kick_slow_than']))
                     t = threading.Thread(target=test_http_proxy, kwargs=kwargs)
                     thread_list.append(t)
                 [t.start() for t in thread_list]
@@ -808,7 +993,7 @@ def check_proxy_list(httpd_inst):
 
             httpd_inst.lock.release()
 
-            time.sleep(float(httpd_inst.server_settings['node_check_interval']))
+            time.sleep(float(httpd_inst.settings['node_check_interval']))
 
     except KeyboardInterrupt:
         pass
@@ -839,7 +1024,7 @@ class POPServer(BaseHTTPServer.HTTPServer):
     proxy_list = None
     server_stat = None
     server_info = None
-    server_settings = None
+    settings = None
 
     auth = None
     auth_base64 = None
@@ -876,13 +1061,19 @@ def main(args):
 
     httpd_inst.proxy_list = mp_manager.dict()
 
-    httpd_inst.server_stat = mp_manager.dict({
-        'waiting_requests': 0,
+    httpd_inst.stat_slot = mp_manager.dict({
+        'processing': 0, # reading or writing
+        'proxy_requests': 0, # total HTTP proxy request
+        'requests': 0, # total requests, includes 500
+    })
+    
+    httpd_inst.stat_node = mp_manager.dict({
+        'processing': 0, # reading or writing
         'proxy_requests': 0, # total HTTP proxy request
         'forward_requests': 0, # total HTTPS CONNECT request
-        'requests': 0, # total requests
-    })
-
+        'requests': 0, # total requests, includes 500
+    })    
+    
     # READ-ONLY info
     httpd_inst.server_info = mp_manager.dict({
         'service_mode': args.mode,
@@ -901,7 +1092,7 @@ def main(args):
         node_kick_slow_than = 5.0,
         node_test_max_concurrency = 50,
     )
-    httpd_inst.server_settings = mp_manager.dict(srv_settings)
+    httpd_inst.settings = mp_manager.dict(srv_settings)
 
     for i in range(processes):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
@@ -1011,4 +1202,3 @@ if __name__ == "__main__":
         d_runner.do_action()
     else:
         main(args)
-

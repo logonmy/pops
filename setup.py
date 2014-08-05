@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 from distutils.core import setup
+from pops import __version__ as version
 
 setup(
     name='pypops',
-    version='201408',
+    version=version,
     packages=[''],
     url='https://github.com/shuge/pops',
     license='MIT License',
