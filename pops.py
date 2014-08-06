@@ -8,7 +8,6 @@ import errno
 import functools
 import logging
 import mimetools
-import pdb
 import re
 import threading
 import time
@@ -21,7 +20,6 @@ import socket
 import sys
 import StringIO
 import traceback
-import urllib2
 import urlparse
 
 from daemon import runner
@@ -49,7 +47,6 @@ HOP_BY_HOP_HEADERS = (
     'Upgrade',
 )
 
-httplib.HTTPConnection.debuglevel = True
 RECV_REQUEST_TIMEOUT = 3.0
 PROXY_REQUEST_TIMEOUT = 5.0
 
@@ -1037,53 +1034,44 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # For custom request logging, see BaseHTTPServer.py:414:log_request
 
 
-def test_http_proxy(down_node_list, proxy_node_addr, proxy_auth, timeout, lock=None):
-    proxies = {'http': 'http://' + ':'.join(proxy_auth) + '@' + proxy_node_addr}
+def test_http_proxy(down_node_list, proxy_node_addr, proxy_auth_base64, timeout, lock=None):
+    chunks = [
+        'GET http://www.baidu.com/ HTTP/1.1',
+        'User-Agent: curl/7.35.0',
+        'Host: www.baidu.com',
+        'Accept: */*',
+        'Connection: close',
+    ]
+    if proxy_auth:
+        chunks.append('Proxy-Authorization: Basic ' + proxy_auth_base64)
+    msg_http_req = '\r\n'.join(chunks) + '\r\n' * 2
 
-    proxy_handler = urllib2.ProxyHandler(proxies=proxies)
-    opener = urllib2.build_opener(proxy_handler)
+    splits = proxy_node_addr.split(':')
+    if len(splits) == 2:
+        host, port = splits[0], int(splits[1])
+    else:
+        host, port = splits[0], 80
+
+    sock = socket.socket()
+    sock.settimeout(timeout)
+    sock.connect((host, port))
 
     try:
-        resp = opener.open(fullurl='http://baidu.com/', timeout=timeout)
+        sock.sendall(msg_http_req)
     except socket.timeout:
         if lock and hasattr(lock, 'acquire'):
             lock.acquire()
             down_node_list[proxy_node_addr] = 'timeout'
             lock.release()
         return False
-    except socket.error, ex:
-        err_code = ex[0]
-        if err_code in errno.errorcode:
-            msg = errno.errorcode[err_code]
-        else:
-            msg = 'error code %d' % err_code
 
-        if lock and hasattr(lock, 'acquire'):
-            lock.acquire()
-            down_node_list[proxy_node_addr] = msg
-            lock.release()
-        return False
-    except urllib2.URLError, ex:
-        reason = ex.args[0]
-        if lock and hasattr(lock, 'acquire'):
-            lock.acquire()
-            down_node_list[proxy_node_addr] = reason
-            lock.release()
-        return False
-    except Exception, ex:
-        if lock and hasattr(lock, 'acquire'):
-            lock.acquire()
-            down_node_list[proxy_node_addr] = str(ex)
-            lock.release()
-        return False
+    buf = SocketHelper.recv_until(sock, '\r\n\r\n')
+    msg = HTTPMessage(buf)
 
+    cl = int(msg.headers.get_value('Content-Length'))
+    body = SocketHelper.recv_all(sock, cl)
 
-    status_code = resp.code
-    body = resp.read()
-    url = resp.url
-    if status_code == httplib.OK and \
-            body.find('http://www.baidu.com/') != -1 and \
-            url == 'http://baidu.com/':
+    if msg.first_line == '200 OK HTTP/1.1' and body.find('http://www.baidu.com/') != -1:
         return True
 
     if lock and hasattr(lock, 'acquire'):
@@ -1119,7 +1107,7 @@ def check_proxy_list(httpd_inst):
                     kwargs = dict(lock=thread_lock,
                                   down_node_list=down_node_list,
                                   proxy_node_addr=proxy_node_parts[idx],
-                                  proxy_auth=httpd_inst.proxy_auth,
+                                  proxy_auth_base64=httpd_inst.proxy_auth_base64,
                                   timeout=float(httpd_inst.settings['node_kick_slow_than']))
                     t = threading.Thread(target=test_http_proxy, kwargs=kwargs)
                     thread_list.append(t)
