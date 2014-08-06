@@ -25,9 +25,6 @@ import urllib2
 import urlparse
 
 from daemon import runner
-import requests
-import requests.auth
-import requests.exceptions
 import select
 
 
@@ -116,6 +113,11 @@ class HTTPMessage(object):
         lines = [i for i in self.raw.split('\r\n') if i]
         self.first_line = lines[0]
         self.headers = HTTPHeadersCaseSensitive(lines=lines[1:])
+
+    def is_chunked(self):
+        cl = self.headers.get_value('Content-Length')
+        te = self.headers.get_value('Transfer-Encoding')
+        return cl is None and te and te.lower() == 'chunked'
 
     @staticmethod
     def read_chunks(fd):
@@ -352,7 +354,7 @@ def stat(handler_obj):
         handler_obj.wfile.write(entry_body)
 
 
-@local_net_required
+# @local_net_required
 @auth_required
 def admin(handler_obj):
     parse = urlparse.urlparse(handler_obj.path)
@@ -519,18 +521,18 @@ class HTTPHelper(object):
     def print_request(req_handler):
         print repr(req_handler.raw_requestline)
         for line in req_handler.headers.headers:
-            print repr(line)
+            print >>sys.stdout, repr(line)
 
     @staticmethod
     def print_headers_case_sensitive(headers):
         for item in headers:
             k, v = item[0], item[1]
-            print repr('%s: %s\r\n' % (k, v))
+            print >>sys.stdout, repr('%s: %s\r\n' % (k, v))
 
     @staticmethod
     def print_headers(lines):
         for line in lines:
-            print repr(line)
+            print >>sys.stdout, repr(line)
 
     @staticmethod
     def print_urlencoded_entry_body(body):
@@ -542,6 +544,14 @@ class HTTPHelper(object):
         fp = StringIO.StringIO(body)
         post_vars = cgi.parse_multipart(fp, parameters_dict)
         HTTPHelper.print_d(post_vars, cut=True)
+
+    @staticmethod
+    def print_msg(msg):
+        assert isinstance(msg, HTTPMessage)
+        print >>sys.stdout, HTTPMessage
+        print >>sys.stdout, repr(msg.first_line)
+        HTTPHelper.print_headers_case_sensitive(msg.headers.headers)
+        print >>sys.stdout
 
 
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
@@ -572,6 +582,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         See also
          - http://www.searchtb.com/2014/05/pythonerrno-32-broken-pipe-导致线程crash解决方法.html
         """
+        # print >>sys.stdout, 'handle_one_request called, socket fd %d' % self.connection.fileno()
         try:
             self.raw_requestline = self.rfile.readline(65537)
             if len(self.raw_requestline) > 65536:
@@ -626,7 +637,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         return self.do_GET()
 
     def do_GET(self):
-        # Helper.print_request(self)
+        # HTTPHelper.print_request(self)
 
         self.headers_case_sensitive = HTTPHeadersCaseSensitive(self.headers.headers)
 
@@ -652,7 +663,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             if free_proxy_node_addr:
                 msg = 'Using free proxy node: ' + free_proxy_node_addr
                 logger.debug(msg)
-                # self._do_OTHERS_node_mode(free_proxy_node_addr=free_proxy_node_addr)
                 self._do_GET_not_admin_detail(free_proxy_node_addr=free_proxy_node_addr)
             else:
                 msg = 'Free proxy node not found'
@@ -678,29 +688,25 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     @request_stat_required
     @proxy_auth_required
     def do_POST(self):
-        # Helper.print_request(self)
+        # HTTPHelper.print_request(self)
 
         self.headers_case_sensitive = HTTPHeadersCaseSensitive(self.headers.headers)
 
-        # We always rewrite Host field.
-        # http://tools.ietf.org/html/rfc2616#section-14.23
-        # http://tools.ietf.org/html/rfc2616#section-5.2
-        # http://tools.ietf.org/html/rfc2616#section-19.6.1.1
         parses = urlparse.urlparse(self.path)
         self.headers_case_sensitive.add_header('Host', parses.netloc, override=True)
 
-        entry_body_length = int(self.headers.get('content-length', 0))
-        entry_body = self.rfile.read(entry_body_length)
+        body_length = int(self.headers.get('content-length', 0))
+        body = self.rfile.read(body_length)
 
         content_type, parameters_dict = cgi.parse_header(self.headers.get('content-type'))
         # parsing 'Content-Type: multipart/form-data; boundary=----------------------------de57d505f7e3\r\n'
         # content_type = 'multipart/form-data'
         # parameters_dict = {'boundary': '----------------------------de57d505f7e3'}
         if content_type == 'application/x-www-form-urlencoded':
-            # Helper.print_urlencoded_entry_body(entry_body)
+            # Helper.print_urlencoded_entry_body(body)
             pass
         elif content_type == 'multipart/form-data':
-            # Helper.print_multipart_entry_body(entry_body, parameters_dict)
+            # Helper.print_multipart_entry_body(body, parameters_dict)
             pass
 
 
@@ -713,7 +719,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             if free_proxy_node_addr:
                 msg = 'Using free proxy node: ' + free_proxy_node_addr
                 logger.debug(msg)
-                return self._do_GET_not_admin_detail(free_proxy_node_addr=free_proxy_node_addr, body=entry_body)
+                return self._do_GET_not_admin_detail(free_proxy_node_addr=free_proxy_node_addr, body=body)
             else:
                 msg = 'Free proxy node not found'
                 logger.debug(msg)
@@ -724,7 +730,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 self.end_headers()
             self._proxy_server_incr_concurrency('http://' + top_domain_name, step=-1)
         else:
-            return self._do_GET_not_admin_detail(body=entry_body)
+            return self._do_GET_not_admin_detail(body=body)
 
     @request_stat_required
     @proxy_auth_required
@@ -754,6 +760,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         conn_type = self.headers.get('Connection', "")
         if (conn_type.lower() != 'keep-alive' and self.protocol_version < "HTTP/1.1"):
             self.connection.close()
+            self.close_connection = 1
 
         self._proxy_server_incr_concurrency('https://' + top_domain_name, step=-1)
 
@@ -909,99 +916,30 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         return free_proxy_node_addr
 
-    def _do_OTHERS_node_mode(self, free_proxy_node_addr=None, data=None, headers=None):
-        proxies = None
-        auth = None
-        if free_proxy_node_addr:
-            proxies = {"http" : "http://" + free_proxy_node_addr}
-
-            value = self.headers.get('proxy-authorization')
-            if value:
-                proxy_auth =  base64.decodestring(value.replace('Basic ', '').strip()).split(':')
-                auth = requests.auth.HTTPProxyAuth(*proxy_auth)
-            else:
-                auth = None
-
-        request_target = self.path
-        url = request_target
-
-        try:
-            r = getattr(requests, self.command.lower())(
-                url=url,
-                data=data,
-                proxies=proxies,
-                headers=headers,
-                timeout=float(self.server.settings['node_send_timeout_in_seconds']),
-                auth=auth)
-
-        except requests.exceptions.Timeout:
-            self.log_error('Request %s timeout' % self.path)
-
-            self.send_response(httplib.SERVICE_UNAVAILABLE)
-            self.end_headers()
-            return
-
-        except requests.exceptions.ConnectionError:
-            self.log_error('Request %s connection refused' % self.path)
-
-            self.send_response(httplib.SERVICE_UNAVAILABLE)
-            self.end_headers()
-            return
-
-        except socket.timeout:
-            self.log_error('Request %s timeout' % self.path)
-
-            self.send_response(httplib.SERVICE_UNAVAILABLE)
-            self.end_headers()
-            return
-
-
-        entry_body = r.content
-        status_code = r.status_code
-
-
-        headers_filtered = filter_hop_by_hop_headers(r.headers)
-
-        # TODO: We should not modified header 'Content-Encoding', fixed this in future.
-        # because IETF standard said you should not, see also
-        # http://tools.ietf.org/html/draft-ietf-httpbis-p1-messaging-14#section-7.1.3.2
-        if len(entry_body):
-            headers_filtered_in_lower_list = set(i.lower() for i in headers_filtered)
-            if 'Content-Encoding'.lower() in headers_filtered_in_lower_list:
-                headers_filtered = drop_header_by_name(headers_filtered, 'Content-Encoding')
-
-            headers_filtered = drop_header_by_name(headers_filtered, 'Content-Length')
-            headers_filtered['Content-Length'] = len(entry_body)
-
-        # FIXME: filter duplicated headers
-        # TODO: filter duplicated headers
-        self.send_response(status_code)
-        for k in headers_filtered.keys():
-            self.send_header(k, headers_filtered[k])
-        self.end_headers()
-
-        if self.command != 'HEAD' and \
-                        status_code >= httplib.OK and \
-                        status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
-            self.wfile.write(entry_body)
-
-        self.server.lock.acquire()
-        if self.server.server_info['service_mode'] == 'slot':
-            self.server.stat_slot['proxy_requests'] += 1
-        else:
-            self.server.stat_node['proxy_requests'] += 1
-        self.server.lock.release()
 
     def _do_GET_not_admin_detail(self, free_proxy_node_addr=None, body=None):
         OTHERS_DROP_HEADERS = ('Proxy-Connection', )
         self.headers_case_sensitive.filter_headers(HOP_BY_HOP_HEADERS + OTHERS_DROP_HEADERS)
 
+        sock = socket.socket()
+        sock.settimeout(PROXY_REQUEST_TIMEOUT)
+
         addr = urlparse.urlparse(self.path).netloc
-        splits = addr.split(':')
-        if len(splits) == 2:
-            host, port = splits[0], int(splits[1])
+
+        if not free_proxy_node_addr:
+            splits = addr.split(':')
+            if len(splits) == 2:
+                host, port = splits[0], int(splits[1])
+            else:
+                host, port = splits[0], 80
         else:
-            host, port = splits[0], 80
+            splits = free_proxy_node_addr.split(':')
+            if len(splits) == 2:
+                host, port = splits[0], int(splits[1])
+            else:
+                host, port = splits[0], 80
+
+        sock.connect((host, port))
 
         # We always rewrite Host field.
         # http://tools.ietf.org/html/rfc2616#section-14.23
@@ -1009,13 +947,12 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # http://tools.ietf.org/html/rfc2616#section-19.6.1.1
         self.headers_case_sensitive.add_header('Host', addr, override=True)
 
-        sock = socket.socket()
-        sock.settimeout(PROXY_REQUEST_TIMEOUT)
-        sock.connect((host, port))
-
-        pos = self.path.index(addr)
-        relative_ref = self.path[pos + len(addr):] or '/'
-        request_line = '%s %s %s\r\n' % (self.command, relative_ref, self.server.protocol_version)
+        if not free_proxy_node_addr:
+            pos = self.path.index(addr)
+            relative_ref = self.path[pos + len(addr):] or '/'
+            request_line = '%s %s %s\r\n' % (self.command, relative_ref, self.server.protocol_version)
+        else:
+            request_line = '%s %s %s\r\n' % (self.command, self.path, self.server.protocol_version)
         SocketHelper.send(sock, request_line)
 
         for item in self.headers_case_sensitive.headers:
@@ -1037,7 +974,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         status_code >= httplib.OK and \
                         status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
             cl = msg.headers.get_value('Content-Length')
-            te = msg.headers.get_value('Transfer-Encoding')
             if cl:
                 msg.headers.filter_headers(HOP_BY_HOP_HEADERS)
 
@@ -1049,7 +985,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 body = SocketHelper.recv_all(sock, int(cl))
                 self.wfile.write(body)
 
-            elif cl is None and te and te.lower() == 'chunked':
+            elif msg.is_chunked():
                 if self.request_version >= "HTTP/1.1":
 
                     msg.headers.filter_headers(HOP_BY_HOP_HEADERS)
@@ -1089,6 +1025,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 k, v = item[0], item[1]
                 self.send_header(k, v)
             self.end_headers()
+
 
         self.server.lock.acquire()
         if self.server.server_info['service_mode'] == 'slot':
@@ -1142,10 +1079,10 @@ def test_http_proxy(down_node_list, proxy_node_addr, proxy_auth, timeout, lock=N
 
 
     status_code = resp.code
-    entry_body = resp.read()
+    body = resp.read()
     url = resp.url
     if status_code == httplib.OK and \
-            entry_body.find('http://www.baidu.com/') != -1 and \
+            body.find('http://www.baidu.com/') != -1 and \
             url == 'http://baidu.com/':
         return True
 

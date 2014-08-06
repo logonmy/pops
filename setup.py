@@ -19,7 +19,6 @@ setup(
     ],
 
     install_requires = [
-        "requests",
         "argparse",
         "lockfile",
         "python-daemon",
