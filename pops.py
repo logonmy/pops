@@ -11,6 +11,7 @@ import os
 import BaseHTTPServer
 import httplib
 import multiprocessing
+import pdb
 import random
 import socket
 import sys
@@ -618,12 +619,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         try:
             sock_dst.connect((ip_addr, port))
+        except socket.timeout:
+            return self.send_error(httplib.GATEWAY_TIMEOUT, message='Forwarding failure')
         except socket.error, ex:
-            err_no, err_msg = ex.args
+            err_no = ex.args[0]
             if err_no == errno.ECONNREFUSED:
                 return self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
             elif err_no == errno.ETIMEDOUT:
-                return self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
+                return self.send_error(httplib.GATEWAY_TIMEOUT, message='Forwarding failure')
             raise ex
 
         self.send_response(httplib.OK, message='Connection established')
@@ -693,8 +696,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
             try:
                 sock.connect((host, port))
+            except socket.timeout:
+                return self.send_error(httplib.GATEWAY_TIMEOUT)
             except socket.error, ex:
-                err_no, err_msg = ex.args
+                err_no = ex.args[0]
                 if err_no == errno.ECONNREFUSED:
                     return self.send_error(httplib.BAD_GATEWAY)
                 elif err_no == errno.ETIMEDOUT:
@@ -717,8 +722,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             ip_addr = random.choice(ipaddrlist)
             try:
                 sock.connect((ip_addr, port))
+            except socket.timeout:
+                return self.send_error(httplib.GATEWAY_TIMEOUT)
             except socket.error, ex:
-                err_no, err_msg = ex.args
+                err_no = ex.args[0]
                 if err_no == errno.ECONNREFUSED:
                     return self.send_error(httplib.BAD_GATEWAY)
                 elif err_no == errno.ETIMEDOUT:
