@@ -31,9 +31,7 @@ try:
 except ImportError:
     color = None
 
-
 __version__ = "201408"
-
 
 SERVER_RECV_TEIMOUT = 3.0
 PROXY_SEND_RECV_TIMEOUT = 5.0
@@ -42,7 +40,6 @@ RECV_BUF_SIZE = 8192
 
 
 class StringHelper(object):
-
     MAX_LEN = 64
 
     @staticmethod
@@ -64,13 +61,14 @@ def print_io(a, b, dir, data):
 
     if color:
         lines = [
-            '%s %s %s %s' % (color.green(ts_prefix), color.blue(a), color.red(dir), color.blue(b))
-            ] + data
+                    '%s %s %s %s' % (color.green(ts_prefix), color.blue(a), color.red(dir), color.blue(b))
+                ] + data
     else:
         lines = [
-            '%s %s %s %s' % (ts_prefix, a, dir, b)
-            ] + data
-    print >>sys.stdout, '\n'.join(lines)
+                    '%s %s %s %s' % (ts_prefix, a, dir, b)
+                ] + data
+    print >> sys.stdout, '\n'.join(lines)
+
 
 def get_top_domain_name(s):
     if s.count('.') == 1:
@@ -92,13 +90,15 @@ def auth_required(func):
     @functools.wraps(func)
     def _wrapped(handler_obj, *args, **kwargs):
         if handler_obj.server.mode == 'slot' and \
-            handler_obj.server.auth_base64 and \
-            not check_authorization(handler_obj):
+                handler_obj.server.auth_base64 and \
+                not check_authorization(handler_obj):
             handler_obj.send_error(code=httplib.UNAUTHORIZED)
             return
         else:
             return func(handler_obj, *args, **kwargs)
+
     return _wrapped
+
 
 def proxy_auth_required(func):
     def check_proxy_authorization(handler_obj):
@@ -111,11 +111,12 @@ def proxy_auth_required(func):
     @functools.wraps(func)
     def _wrapped(handler_obj, *args, **kwargs):
         if handler_obj.server.proxy_auth_base64 and \
-            not check_proxy_authorization(handler_obj):
+                not check_proxy_authorization(handler_obj):
             handler_obj.send_error(code=httplib.PROXY_AUTHENTICATION_REQUIRED)
             return
         else:
             return func(handler_obj, *args, **kwargs)
+
     return _wrapped
 
 
@@ -141,6 +142,7 @@ def auto_slot(func):
                 return
         else:
             return func(handler_obj, *args, **kwargs)
+
     return _wrapped
 
 
@@ -166,11 +168,11 @@ def stat_request(func):
                 handler_obj.server.stat_node['proxy_requests'] += 1
             handler_obj.server.lock.release()
         except socket.timeout:
-            print >>sys.stdout, 'socket timeout, fd %d' % handler_obj.connection.fileno()
+            print >> sys.stdout, 'socket timeout, fd %d' % handler_obj.connection.fileno()
         except socket.error, ex:
             err_no = ex.args[0]
             if err_no == errno.EPIPE:
-                print >>sys.stdout, 'broken pipe, fd %d' % handler_obj.connection.fileno()
+                print >> sys.stdout, 'broken pipe, fd %d' % handler_obj.connection.fileno()
             else:
                 raise ex
 
@@ -186,6 +188,7 @@ def stat_request(func):
             handler_obj.server.lock.release()
 
         return True
+
     return _wrapped
 
 
@@ -248,7 +251,7 @@ def update_node_status(httpd_inst):
     thread_lock = threading.Lock()
 
     try:
-        print >>sys.stdout, '%s started' % multiprocessing.current_process().name
+        print >> sys.stdout, '%s started' % multiprocessing.current_process().name
 
         while True:
 
@@ -256,12 +259,11 @@ def update_node_status(httpd_inst):
             my_proxy_list = copy.deepcopy(httpd_inst.node_list)
             httpd_inst.lock.release()
 
-
             down_node_list = dict()
             node_test_max_concurrency = int(httpd_inst.settings_slot['node_test_max_concurrency'])
 
             time_s = time.time()
-            print >>sys.stdout, 'Test proxy nodes started, node_test_max_concurrency = %d' % node_test_max_concurrency
+            print >> sys.stdout, 'Test proxy nodes started, node_test_max_concurrency = %d' % node_test_max_concurrency
 
             for range_start in range(0, len(my_proxy_list), node_test_max_concurrency):
                 proxy_node_parts = list(my_proxy_list)[range_start:range_start + int(node_test_max_concurrency)]
@@ -279,15 +281,14 @@ def update_node_status(httpd_inst):
                 [t.join() for t in thread_list]
 
             time_e = time.time()
-            print >>sys.stdout, 'Test proxy nodes finished, total nodes %d in %f seconds' % (len(my_proxy_list), time_e - time_s)
-
+            print >> sys.stdout, 'Test proxy nodes finished, total nodes %d in %f seconds' % (len(my_proxy_list), time_e - time_s)
 
             httpd_inst.lock.acquire()
             for idx in range(len(httpd_inst.node_list)):
                 item = httpd_inst.node_list[idx]
                 if item['_host_port'] in down_node_list:
                     item['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
-                    print >>sys.stdout, 'Test %s got %s, kick it from proxy list' % (item['_host_port'], down_node_list[item['_host_port']])
+                    print >> sys.stdout, 'Test %s got %s, kick it from proxy list' % (item['_host_port'], down_node_list[item['_host_port']])
                 else:
                     item['_status'] = ProxyNodeStatus.UP_AND_RUNNING
                 httpd_inst.node_list[idx] = item
@@ -297,15 +298,15 @@ def update_node_status(httpd_inst):
     finally:
         httpd_inst.server_close()
 
-class SocketHelper(object):
 
+class SocketHelper(object):
     @staticmethod
     def send(fd, data):
         total = len(data)
         sent = 0
         while sent < total:
             if hasattr(fd, 'write'):
-               count = fd.write(data[sent:])
+                count = fd.write(data[sent:])
             elif hasattr(fd, 'send'):
                 count = fd.send(data[sent:])
             else:
@@ -428,7 +429,6 @@ class HTTPHeadersCaseSensitive(object):
 
 
 class HTTPMessage(object):
-
     def __init__(self, msg):
         self.raw = msg
         self.first_line = None
@@ -436,7 +436,8 @@ class HTTPMessage(object):
         self.body = None
         self.parse_msg()
 
-    def parse_first_line(self): pass
+    def parse_first_line(self):
+        pass
 
     def parse_msg(self):
         splits = self.raw.split('\r\n\r\n')
@@ -474,7 +475,6 @@ class HTTPMessage(object):
 
 
 class HTTPRequest(HTTPMessage):
-
     def __init__(self, msg):
         super(HTTPRequest, self).__init__(msg=msg)
 
@@ -491,7 +491,6 @@ class HTTPRequest(HTTPMessage):
 
 
 class HTTPResponse(HTTPMessage):
-
     def __init__(self, msg):
         super(HTTPResponse, self).__init__(msg=msg)
 
@@ -508,7 +507,6 @@ class HTTPResponse(HTTPMessage):
 
 
 class ProxyNodeStatus(object):
-
     DELETED_OR_DOWN = 0
     UP_AND_RUNNING = 1
 
@@ -527,6 +525,7 @@ def handler_home(handler_obj):
     handler_obj.end_headers()
     handler_obj.wfile.write(body)
 
+
 def handler_favicon(handler_obj):
     handler_obj.send_response(httplib.NOT_FOUND)
     handler_obj.send_header('Connection', 'close')
@@ -539,10 +538,12 @@ def host_port_in_node_list(node_list, host_port):
             return True
     return False
 
+
 def fix_host_port(s):
     if s.find(':') == -1:
         return s + ':1080'
     return s
+
 
 @auth_required
 def handler_admin(handler_obj):
@@ -568,7 +569,7 @@ def handler_admin(handler_obj):
                     item = dict(
                         _status=ProxyNodeStatus.UP_AND_RUNNING,
                         _host_port=host_port,
-                        )
+                    )
                     handler_obj.server.node_list.append(item)
                 handler_obj.log_message('Appended %s into node list' % host_port)
 
@@ -616,36 +617,31 @@ def handler_admin(handler_obj):
 
 @auth_required
 def handler_stat(handler_obj):
-    if handler_obj.server.mode != 'slot':
-        handler_obj.send_error(httplib.NOT_FOUND)
-        # handler_obj.send_response(httplib.NOT_FOUND)
-        # handler_obj.send_header('Connection', 'close')
-        # handler_obj.end_headers()
-        return
-
     handler_obj.server.lock.acquire()
-
-    total_up_nodes = 0
-    for item in handler_obj.server.node_list:
-        if item['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
-            total_up_nodes += 1
 
     migrated = dict(
         server_info=handler_obj.server.server_info,
-        node_list=handler_obj.server.node_list,
     )
 
     if handler_obj.server.mode == 'slot':
+        total_up_nodes = 0
+        for item in handler_obj.server.node_list:
+            if item['_status'] == ProxyNodeStatus.UP_AND_RUNNING:
+                total_up_nodes += 1
+
         migrated.update(dict(
-            settings_slot=handler_obj.server.settings_slot,
             stat_slot=handler_obj.server.stat_slot,
+
+            settings_slot=handler_obj.server.settings_slot,
             total_up_nodes=total_up_nodes,
-            total_nodes=len(handler_obj.server.node_list)
+
+            total_nodes=len(handler_obj.server.node_list),
+            node_list=handler_obj.server.node_list,
         ))
     else:
         migrated.update(dict(
             stat_node=handler_obj.server.stat_node,
-            ))
+        ))
 
     body = json.dumps(copy.deepcopy(migrated), indent=2) + "\n"
 
@@ -658,6 +654,7 @@ def handler_stat(handler_obj):
     if handler_obj.command != 'HEAD':
         handler_obj.wfile.write(body)
 
+
 non_proxy_req_handler_list = (
     ('^$', handler_home),
     ('^favicon.ico$', handler_favicon),
@@ -668,7 +665,6 @@ non_proxy_req_handler_list = (
 
 
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
-
     server_version = "POPS/" + __version__
     protocol_version = "HTTP/1.1"
     sys_version = ""
@@ -826,7 +822,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.send_header('Proxy-Agent', self.server_version)
         self.end_headers()
 
-
         sock_src_shutdown, sock_dst_shutdown = False, False
         while (not sock_src_shutdown) and (not sock_dst_shutdown):
             read_list = []
@@ -953,7 +948,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         s = SocketHelper.recv_until(sock, '\r\n\r\n')
         msg_resp = HTTPResponse(msg=s)
 
-
         line = msg_resp.first_line + '\r\n'
         self.wfile.write(line)
 
@@ -989,7 +983,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         ua_ce = self.headers_case_sensitive.get_value('Accept-Encoding', default='')
 
         if ts_ce.find('gzip') != -1 and ua_ce.find('gzip') == -1:
-            gz = gzip.GzipFile(fileobj = StringIO.StringIO(body))
+            gz = gzip.GzipFile(fileobj=StringIO.StringIO(body))
             body = gz.read()
             msg_resp.headers.add_header('Content-Length', str(len(body)), override=True)
 
@@ -1049,14 +1043,13 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             msg = "Target server response body in gzip, and client doesn't supports gzip"
             self.log_message(msg)
 
-
         chunk_data_list = []
         for line in HTTPMessage.read_chunks(sock):
             chunk_data_list.append(line)
         body = ''.join(chunk_data_list)
 
         if not using_gzip:
-            gz = gzip.GzipFile(fileobj = StringIO.StringIO(body))
+            gz = gzip.GzipFile(fileobj=StringIO.StringIO(body))
             body = gz.read()
 
         msg_resp.headers.add_header('Content-Length', str(len(body)), override=True)
@@ -1083,14 +1076,13 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
 def serve_forever(httpd_inst):
     try:
-        print >>sys.stdout, '%s started' % multiprocessing.current_process().name
+        print >> sys.stdout, '%s started' % multiprocessing.current_process().name
         httpd_inst.serve_forever()
     finally:
         httpd_inst.server_close()
 
 
 class POPServer(BaseHTTPServer.HTTPServer):
-
     allow_reuse_address = True
     args = None
     auth_base64 = None
@@ -1148,13 +1140,13 @@ def main(args):
         serving_on="%s:%d" % (server_address[0], server_address[1]),
         pid=pid,
         error_log=error_log_path,
-        ))
+    ))
 
     httpd_inst.settings_slot = httpd_inst.mp_manager.dict(dict(
-        node_per_domain_max_concurrency = 1,
-        node_check_interval = 60,
-        node_kick_slow_than = 5,
-        node_test_max_concurrency = 50,
+        node_per_domain_max_concurrency=1,
+        node_check_interval=60,
+        node_kick_slow_than=5,
+        node_test_max_concurrency=50,
     ))
 
     for i in range(processes):
@@ -1173,14 +1165,12 @@ def main(args):
         srv_name = 'node'
     else:
         srv_name = 'slot'
-    print >>sys.stdout, "POPS %s started, listen on %s:%s, pid %d"  % (srv_name, server_address[0], server_address[1], pid)
-
+    print >> sys.stdout, "POPS %s started, listen on %s:%s, pid %d" % (srv_name, server_address[0], server_address[1], pid)
 
     serve_forever(httpd_inst)
 
 
 class MyDaemon(object):
-
     def __init__(self, args):
         self.args = args
 
@@ -1195,7 +1185,6 @@ class MyDaemon(object):
 
 
 class MyDaemonRunner(runner.DaemonRunner):
-
     def __init__(self, app, action):
         self.action = action
         runner.DaemonRunner.__init__(self, app)
