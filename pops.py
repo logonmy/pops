@@ -602,8 +602,8 @@ def handler_admin(handler_obj):
         k, v = qs_in_d['k'][0], qs_in_d['v'][0]
 
         handler_obj.server.lock.acquire()
-        if k in handler_obj.server.settings:
-            handler_obj.server.settings[k] = v
+        if k in handler_obj.server.settings_slot:
+            handler_obj.server.settings_slot[k] = v
         handler_obj.server.lock.release()
 
         handler_obj.send_response(httplib.OK)
