@@ -15,7 +15,7 @@ if [ "$slot_host_port" = "" ] || [ "$node_host_port" = "" ] ;then
 fi
 
 if [ -f "$node_host_port" ]; then
-    host_addr_port_list=`cat "$node_host_port" |grep -v ^$ | sort | uniq | tr "\\n" "," | sed 's/\(.*\),/\1/'`
+    host_addr_port_list=`cat "$node_host_port" |grep -v ^$ | grep -v '#' | sort | uniq | tr "\\n" "," | sed 's/\(.*\),/\1/'`
     curl --user $ADMIN_AUTH "http://$slot_host_port/admin/node/add?addr=$host_addr_port_list"
 else
     curl --user $ADMIN_AUTH "http://$slot_host_port/admin/node/add?addr=$node_host_port"
