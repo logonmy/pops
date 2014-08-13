@@ -16,6 +16,9 @@ import random
 import socket
 import sys
 import StringIO
+import time
+import threading
+import traceback
 import urlparse
 import select
 
@@ -107,8 +110,7 @@ def proxy_auth_required(func):
 
     @functools.wraps(func)
     def _wrapped(handler_obj, *args, **kwargs):
-        if handler_obj.server.mode == 'node' and \
-            handler_obj.server.proxy_auth_base64 and \
+        if handler_obj.server.proxy_auth_base64 and \
             not check_proxy_authorization(handler_obj):
             handler_obj.send_error(code=httplib.PROXY_AUTHENTICATION_REQUIRED)
             return
@@ -116,6 +118,184 @@ def proxy_auth_required(func):
             return func(handler_obj, *args, **kwargs)
     return _wrapped
 
+
+def auto_slot(func):
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):
+        if handler_obj.server.mode == 'slot':
+            top_domain_name = get_top_domain_name(urlparse.urlparse(handler_obj.path).netloc)
+            # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
+            node_host_port = handler_obj._get_or_put_free_node('http://' + top_domain_name)
+            if node_host_port:
+                msg = 'Using free proxy node: ' + node_host_port
+                handler_obj.log_message(msg)
+
+                try:
+                    kwargs.update(dict(free_node_host_port=node_host_port))
+                    func(handler_obj, *args, **kwargs)
+                finally:
+                    handler_obj._get_or_put_free_node('http://' + top_domain_name, node_host_port=node_host_port)
+            else:
+                msg = 'Free proxy node not found'
+                handler_obj.send_error(code=httplib.SERVICE_UNAVAILABLE, message=msg)
+                return
+        else:
+            return func(handler_obj, *args, **kwargs)
+    return _wrapped
+
+
+def stat_request(func):
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):
+        handler_obj.server.lock.acquire()
+        if handler_obj.server.mode == 'slot':
+            handler_obj.server.stat_slot['requests'] += 1
+            handler_obj.server.stat_slot['processing'] += 1
+        else:
+            handler_obj.server.stat_node['requests'] += 1
+            handler_obj.server.stat_node['processing'] += 1
+        handler_obj.server.lock.release()
+
+        try:
+            func(handler_obj, *args, **kwargs)
+
+            handler_obj.server.lock.acquire()
+            if handler_obj.server.mode == 'slot':
+                handler_obj.server.stat_slot['proxy_requests'] += 1
+            else:
+                handler_obj.server.stat_node['proxy_requests'] += 1
+            handler_obj.server.lock.release()
+        except socket.timeout:
+            print >>sys.stdout, 'socket timeout, fd %d' % handler_obj.connection.fileno()
+        except socket.error, ex:
+            err_no = ex.args[0]
+            if err_no == errno.EPIPE:
+                print >>sys.stdout, 'broken pipe, fd %d' % handler_obj.connection.fileno()
+            else:
+                raise ex
+
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+
+        finally:
+            handler_obj.server.lock.acquire()
+            if handler_obj.server.mode == 'slot':
+                handler_obj.server.stat_slot['processing'] -= 1
+            else:
+                handler_obj.server.stat_node['processing'] -= 1
+            handler_obj.server.lock.release()
+
+        return True
+    return _wrapped
+
+
+def test_proxy_node(down_node_list, node_host_port, proxy_auth_base64, timeout, lock=None):
+    def _():
+        chunks = [
+            'GET http://baidu.com/ HTTP/1.1',
+            'Host: baidu.com',
+            'Connection: close',
+        ]
+        if proxy_auth_base64:
+            chunks.append('Proxy-Authorization: Basic ' + proxy_auth_base64)
+        msg_http_req = '\r\n'.join(chunks) + '\r\n' * 2
+
+        splits = node_host_port.split(':')
+        if len(splits) == 2:
+            host, port = splits[0], int(splits[1])
+        else:
+            host, port = splits[0], 80
+
+        sock = socket.socket()
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+
+        sock.sendall(msg_http_req)
+
+        buf = SocketHelper.recv_until(sock, '\r\n\r\n')
+        msg_resp = HTTPResponse(buf)
+
+        if msg_resp.status_code != httplib.OK or msg_resp.reason != 'OK':
+            return False
+
+        cl = msg_resp.headers.get_value('Content-Length')
+        if cl is None:
+            return False
+        body = SocketHelper.recv_all(sock, int(cl))
+
+        if body.find('http://www.baidu.com/') != -1:
+            return True
+        return False
+
+    try:
+        if not _():
+            if lock and hasattr(lock, 'acquire'):
+                lock.acquire()
+                down_node_list[node_host_port] = 'un-expected repsonse'
+                lock.release()
+    except Exception, ex:
+        traceback.print_exc(file=sys.stderr)
+
+        if lock and hasattr(lock, 'acquire'):
+            lock.acquire()
+            down_node_list[node_host_port] = str(ex)
+            lock.release()
+
+        return False
+
+
+def update_node_status(httpd_inst):
+    thread_lock = threading.Lock()
+
+    try:
+        print >>sys.stdout, '%s started' % multiprocessing.current_process().name
+
+        while True:
+
+            httpd_inst.lock.acquire()
+            my_proxy_list = copy.deepcopy(httpd_inst.node_list)
+            httpd_inst.lock.release()
+
+
+            down_node_list = dict()
+            node_test_max_concurrency = int(httpd_inst.settings_slot['node_test_max_concurrency'])
+
+            time_s = time.time()
+            print >>sys.stdout, 'Test proxy nodes started, node_test_max_concurrency = %d' % node_test_max_concurrency
+
+            for range_start in range(0, len(my_proxy_list), node_test_max_concurrency):
+                proxy_node_parts = list(my_proxy_list)[range_start:range_start + int(node_test_max_concurrency)]
+
+                thread_list = []
+                for idx in range(len(proxy_node_parts)):
+                    kwargs = dict(lock=thread_lock,
+                                  down_node_list=down_node_list,
+                                  node_host_port=proxy_node_parts[idx]['_host_port'],
+                                  proxy_auth_base64=httpd_inst.proxy_auth_base64,
+                                  timeout=float(httpd_inst.settings_slot['node_kick_slow_than']))
+                    t = threading.Thread(target=test_proxy_node, kwargs=kwargs)
+                    thread_list.append(t)
+                [t.start() for t in thread_list]
+                [t.join() for t in thread_list]
+
+            time_e = time.time()
+            print >>sys.stdout, 'Test proxy nodes finished, total nodes %d in %f seconds' % (len(my_proxy_list), time_e - time_s)
+
+
+            httpd_inst.lock.acquire()
+            for idx in range(len(httpd_inst.node_list)):
+                item = httpd_inst.node_list[idx]
+                if item['_host_port'] in down_node_list:
+                    item['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
+                    print >>sys.stdout, 'Test %s got %s, kick it from proxy list' % (item['_host_port'], down_node_list[item['_host_port']])
+                else:
+                    item['_status'] = ProxyNodeStatus.UP_AND_RUNNING
+                httpd_inst.node_list[idx] = item
+            httpd_inst.lock.release()
+
+            time.sleep(float(httpd_inst.settings_slot['node_check_interval']))
+    finally:
+        httpd_inst.server_close()
 
 class SocketHelper(object):
 
@@ -348,7 +528,9 @@ def handler_home(handler_obj):
     handler_obj.wfile.write(body)
 
 def handler_favicon(handler_obj):
-    handler_obj.send_error(httplib.NOT_FOUND)
+    handler_obj.send_response(httplib.NOT_FOUND)
+    handler_obj.send_header('Connection', 'close')
+    handler_obj.end_headers()
 
 
 def host_port_in_node_list(node_list, host_port):
@@ -357,8 +539,20 @@ def host_port_in_node_list(node_list, host_port):
             return True
     return False
 
+def fix_host_port(s):
+    if s.find(':') == -1:
+        return s + ':1080'
+    return s
+
 @auth_required
 def handler_admin(handler_obj):
+    if handler_obj.server.mode != 'slot':
+        handler_obj.send_error(httplib.NOT_FOUND)
+        # handler_obj.send_response(httplib.NOT_FOUND)
+        # handler_obj.send_header('Connection', 'close')
+        # handler_obj.end_headers()
+        return
+
     parse = urlparse.urlparse(handler_obj.path)
     qs_in_d = urlparse.parse_qs(parse.query)
 
@@ -368,6 +562,7 @@ def handler_admin(handler_obj):
         handler_obj.server.lock.acquire()
 
         for host_port in addr_list:
+            host_port = fix_host_port(host_port)
             if parse.path == '/admin/node/add':
                 if not host_port_in_node_list(handler_obj.server.node_list, host_port):
                     item = dict(
@@ -389,11 +584,12 @@ def handler_admin(handler_obj):
 
         handler_obj.server.lock.acquire()
 
-        for addr_ip_port in addr_list:
+        for host_port in addr_list:
+            host_port = fix_host_port(host_port)
             for item in handler_obj.server.node_list:
-                if item['_host_port'] == addr_ip_port:
+                if item['_host_port'] == host_port:
                     handler_obj.server.node_list.remove(item)
-                    handler_obj.log_message('Delete proxy node %s' % addr_ip_port)
+                    handler_obj.log_message('Delete proxy node %s' % host_port)
 
         handler_obj.server.lock.release()
 
@@ -420,6 +616,13 @@ def handler_admin(handler_obj):
 
 @auth_required
 def handler_stat(handler_obj):
+    if handler_obj.server.mode != 'slot':
+        handler_obj.send_error(httplib.NOT_FOUND)
+        # handler_obj.send_response(httplib.NOT_FOUND)
+        # handler_obj.send_header('Connection', 'close')
+        # handler_obj.end_headers()
+        return
+
     handler_obj.server.lock.acquire()
 
     total_up_nodes = 0
@@ -535,8 +738,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         try:
             if (self.server.node_list_idx.value + 1) > len(self.server.node_list):
                 self.server.node_list_idx.value = 0
+            offset = self.server.node_list_idx.value
 
-            for item in self.server.node_list[self.server.node_list_idx.value:]:
+            for idx in range(len(self.server.node_list[offset:])):
+                item = self.server.node_list[offset + idx]
+
                 concurrency = item.get(top_domain_name, 0)
                 # this proxy allow to crawl records from this domain name in concurrency mode
                 if not node_host_port:
@@ -559,13 +765,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                             item[top_domain_name] = 0
                         break
 
+                self.server.node_list[offset + idx] = item
+
             self.server.node_list_idx.value += 1
         finally:
             self.server.lock.release()
 
         return free_node_host_port
 
-    @auth_required
     def _do_GET_for_non_proxy_req(self):
         map = dict(non_proxy_req_handler_list)
         for path_in_re in map.keys():
@@ -581,24 +788,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         if not self.is_valid_proxy_req():
             return
 
-        if self.server.mode == 'slot':
-            top_domain_name = get_top_domain_name(urlparse.urlparse(self.path).netloc)
-            # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
-            node_host_port = self._get_or_put_free_node('http://' + top_domain_name)
-            if node_host_port:
-                msg = 'Using free proxy node: ' + node_host_port
-                self.log_message(msg)
-
-                try:
-                    self._forward_req(free_node_host_port=node_host_port)
-                finally:
-                    self._get_or_put_free_node('http://' + top_domain_name, node_host_port=node_host_port)
-            else:
-                msg = 'Free proxy node not found'
-                self.send_error(code=httplib.SERVICE_UNAVAILABLE, message=msg)
-                return
-        else:
-            self._forward_req()
+        self._forward_req()
 
     def do_POST(self):
         if not self.is_valid_proxy_req():
@@ -608,8 +798,13 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         body = self.rfile.read(body_length)
         self._forward_req(body=body)
 
+    @stat_request
     @proxy_auth_required
     def do_CONNECT(self):
+        """
+        FIXME: node doesn't response in China network, re-product with
+            curl -i --proxy localhost https://twitter.com
+        """
         host, port = self.path.split(':')
         port = int(port)
 
@@ -625,8 +820,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             err_no = ex.args[0]
             if err_no == errno.ECONNREFUSED:
                 return self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
-            elif err_no == errno.ETIMEDOUT:
-                return self.send_error(httplib.GATEWAY_TIMEOUT, message='Forwarding failure')
             raise ex
 
         self.send_response(httplib.OK, message='Connection established')
@@ -682,7 +875,9 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         self.log_message(msg)
                         sock_dst_shutdown = True
 
+    @stat_request
     @proxy_auth_required
+    @auto_slot
     def _forward_req(self, body=None, free_node_host_port=None):
         sock = socket.socket()
         sock.settimeout(PROXY_SEND_RECV_TIMEOUT)
@@ -702,8 +897,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 err_no = ex.args[0]
                 if err_no == errno.ECONNREFUSED:
                     return self.send_error(httplib.BAD_GATEWAY)
-                elif err_no == errno.ETIMEDOUT:
-                    return self.send_error(httplib.GATEWAY_TIMEOUT)
                 raise ex
 
             sock_addr = free_node_host_port
@@ -728,8 +921,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 err_no = ex.args[0]
                 if err_no == errno.ECONNREFUSED:
                     return self.send_error(httplib.BAD_GATEWAY)
-                elif err_no == errno.ETIMEDOUT:
-                    return self.send_error(httplib.GATEWAY_TIMEOUT)
                 raise ex
 
             request_uri = parses.path or '/'
@@ -893,8 +1084,6 @@ def serve_forever(httpd_inst):
     try:
         print >>sys.stdout, '%s started' % multiprocessing.current_process().name
         httpd_inst.serve_forever()
-    # except KeyboardInterrupt:
-    #     [p.terminate() for p in multiprocessing.active_children()]
     finally:
         httpd_inst.server_close()
 
@@ -932,10 +1121,20 @@ def main(args):
 
     httpd_inst.mp_manager = multiprocessing.Manager()
     httpd_inst.node_list = httpd_inst.mp_manager.list()
-    httpd_inst.stat_node = httpd_inst.mp_manager.dict()
-    httpd_inst.stat_slot = httpd_inst.mp_manager.dict()
     httpd_inst.lock = multiprocessing.Lock()
     httpd_inst.node_list_idx = multiprocessing.Value('i', 0)
+
+    httpd_inst.stat_node = httpd_inst.mp_manager.dict(dict(
+        requests=1,
+        processing=1,
+        proxy_requests=1,
+    ))
+
+    httpd_inst.stat_slot = httpd_inst.mp_manager.dict(dict(
+        requests=1,
+        processing=1,
+        proxy_requests=1,
+    ))
 
     # READ-ONLY info
     httpd_inst.server_info = httpd_inst.mp_manager.dict(dict(
@@ -954,9 +1153,14 @@ def main(args):
         node_test_max_concurrency = 50,
     ))
 
-
     for i in range(processes):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
+        if args.daemon:
+            p.daemon = args.daemon
+        p.start()
+
+    if httpd_inst.mode == 'slot':
+        p = multiprocessing.Process(target=update_node_status, name='UpdateNodeStatusProcess', args=(httpd_inst,))
         if args.daemon:
             p.daemon = args.daemon
         p.start()
