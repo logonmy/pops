@@ -1202,7 +1202,7 @@ class MyDaemonRunner(runner.DaemonRunner):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
-    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS')
+    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS', version=__version__)
 
     parser.add_argument('--auth',
                         default='god:hidemyass',

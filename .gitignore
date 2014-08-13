@@ -1,5 +1,6 @@
 .DS_Store
 .idea/
+deps/
 build/
 dist/
 ignores/
@@ -12,4 +13,5 @@ t.*
 *.txt
 *.pid
 scripts/delegated-apnic-latest
+scripts/*.txt
 MANIFEST
