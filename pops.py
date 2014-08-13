@@ -732,6 +732,7 @@ def handler_stat(handler_obj):
     handler_obj.send_response(httplib.OK)
     handler_obj.send_header('Content-Type', 'application/json')
     handler_obj.send_header('Content-Length', str(len(body)))
+    handler_obj.send_header('Access-Control-Allow-Origin', '*')
     handler_obj.end_headers()
     if handler_obj.command != 'HEAD':
         handler_obj.wfile.write(body)
