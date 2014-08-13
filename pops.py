@@ -826,6 +826,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self.send_header('Proxy-Agent', self.server_version)
         self.end_headers()
 
+
         sock_src_shutdown, sock_dst_shutdown = False, False
         while (not sock_src_shutdown) and (not sock_dst_shutdown):
             read_list = []
@@ -937,8 +938,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             line = '%s: %s\r\n' % (item[0], item[1])
             SocketHelper.send(sock, line)
 
-        if self.server.mode == 'slot' and self.server.proxy_auth_base64:
-            line = 'Proxy-Authorization: Basic %s\r\n' % self.server.proxy_auth_base64
+        if self.server.mode == 'slot' and self.server.proxy_node_auth_base64:
+            line = 'Proxy-Authorization: Basic %s\r\n' % self.server.proxy_node_auth_base64
             SocketHelper.send(sock, line)
 
         SocketHelper.send(sock, '\r\n')
@@ -1119,21 +1120,24 @@ def main(args):
     if args.proxy_auth:
         httpd_inst.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
 
+    if args.proxy_node_auth:
+        httpd_inst.proxy_node_auth_base64 = base64.encodestring(args.proxy_node_auth).strip()
+
     httpd_inst.mp_manager = multiprocessing.Manager()
     httpd_inst.node_list = httpd_inst.mp_manager.list()
     httpd_inst.lock = multiprocessing.Lock()
     httpd_inst.node_list_idx = multiprocessing.Value('i', 0)
 
     httpd_inst.stat_node = httpd_inst.mp_manager.dict(dict(
-        requests=1,
-        processing=1,
-        proxy_requests=1,
+        requests=0,
+        processing=0,
+        proxy_requests=0,
     ))
 
     httpd_inst.stat_slot = httpd_inst.mp_manager.dict(dict(
-        requests=1,
-        processing=1,
-        proxy_requests=1,
+        requests=0,
+        processing=0,
+        proxy_requests=0,
     ))
 
     # READ-ONLY info
@@ -1209,6 +1213,10 @@ if __name__ == "__main__":
                         help='default god:hidemyass')
 
     parser.add_argument('--proxy_auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
+    parser.add_argument('--proxy_node_auth',
                         default='god:hidemyass',
                         help='default god:hidemyass')
 
