@@ -192,15 +192,15 @@ def stat_request(func):
     return _wrapped
 
 
-def test_proxy_node(down_node_list, node_host_port, proxy_auth_base64, timeout, lock=None):
+def test_proxy_node(down_node_list, node_host_port, proxy_node_auth_base64, timeout, lock=None):
     def _():
         chunks = [
             'GET http://baidu.com/ HTTP/1.1',
             'Host: baidu.com',
             'Connection: close',
         ]
-        if proxy_auth_base64:
-            chunks.append('Proxy-Authorization: Basic ' + proxy_auth_base64)
+        if proxy_node_auth_base64:
+            chunks.append('Proxy-Authorization: Basic ' + proxy_node_auth_base64)
         msg_http_req = '\r\n'.join(chunks) + '\r\n' * 2
 
         splits = node_host_port.split(':')
@@ -273,7 +273,7 @@ def update_node_status(httpd_inst):
                     kwargs = dict(lock=thread_lock,
                                   down_node_list=down_node_list,
                                   node_host_port=proxy_node_parts[idx]['_host_port'],
-                                  proxy_auth_base64=httpd_inst.proxy_auth_base64,
+                                  proxy_node_auth_base64=httpd_inst.proxy_node_auth_base64,
                                   timeout=float(httpd_inst.settings_slot['node_kick_slow_than']))
                     t = threading.Thread(target=test_proxy_node, kwargs=kwargs)
                     thread_list.append(t)
