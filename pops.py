@@ -52,8 +52,6 @@ class StringHelper(object):
 
 
 def print_io(a, b, dir, data):
-    print sys.argv
-
     ts_prefix = str(datetime.datetime.today())[:19]
 
     if not isinstance(data, (set, tuple, list)):
@@ -146,6 +144,87 @@ def auto_slot(func):
     return _wrapped
 
 
+def auto_slot_connect(func):
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):
+        if handler_obj.server.mode == 'slot':
+            OTHERS_DROP_HEADERS = ('Proxy-Connection', )
+            handler_obj.headers_case_sensitive = HTTPHeadersCaseSensitive(
+                lines=handler_obj.headers.headers,
+                ignores=HTTPHeadersCaseSensitive.HOP_BY_HOP_HEADERS + OTHERS_DROP_HEADERS)
+
+            host = handler_obj.path.split(':')[0] # 'tools.ietf.org:443' -> 'tools.ietf.org'
+            top_domain_name = get_top_domain_name(host)
+            # foo.bar.com => bar.com, abc.foo.bar.com => bar.com
+            node_host_port = handler_obj._get_or_put_free_node('https://' + top_domain_name)
+            if node_host_port:
+                msg = 'Using free proxy node: ' + node_host_port
+                handler_obj.log_message(msg)
+
+                host, port = node_host_port.split(':')
+                port = int(port)
+
+                hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(host)
+                ip_addr = random.choice(ipaddrlist)
+
+                sock = socket.socket()
+                try:
+                    sock.connect((ip_addr, port))
+                except socket.error, ex:
+                    err_no, err_msg = ex.args
+                    if err_no == errno.ECONNREFUSED:
+                        handler_obj.send_error(httplib.SERVICE_UNAVAILABLE, message='connection refused')
+                        return
+                    raise ex
+
+
+                msg = 'Forward request from user-agent %s to proxy node %s' % (handler_obj.client_address_string, node_host_port)
+                handler_obj.log_message(msg)
+                SocketHelper.send(sock, handler_obj.raw_requestline)
+                for item in handler_obj.headers_case_sensitive.headers:
+                    line = '%s: %s\r\n' % (item[0], item[1])
+                    SocketHelper.send(sock, line)
+
+                if handler_obj.server.mode == 'slot' and handler_obj.server.proxy_node_auth_base64:
+                    line = 'Proxy-Authorization: Basic %s\r\n' % handler_obj.server.proxy_node_auth_base64
+                    SocketHelper.send(sock, line)
+
+                SocketHelper.send(sock, '\r\n')
+
+
+                data = SocketHelper.recv_until(sock, '\r\n\r\n')
+                msg = 'Forward request from proxy node %s to user-agent %s' % (node_host_port, handler_obj.client_address_string)
+                handler_obj.log_message(msg)
+                msg_resp = HTTPResponse(msg=data)
+
+                handler_obj.wfile.write(msg_resp.first_line)
+                handler_obj.log_request(msg_resp.status_code)
+
+                for item in msg_resp.headers.headers:
+                    line = '%s: %s\r\n' % (item[0], item[1])
+                    handler_obj.wfile.write(line)
+                handler_obj.wfile.write('\r\n')
+
+                if msg_resp.status_code != httplib.OK:
+                    sock.close()
+                    handler_obj._get_or_put_free_node('https://' + top_domain_name, node_host_port=node_host_port)
+                    return
+
+                try:
+                    kwargs.update(dict(sock=sock))
+                    func(handler_obj, *args, **kwargs)
+                finally:
+                    handler_obj._get_or_put_free_node('https://' + top_domain_name, node_host_port=node_host_port)
+            else:
+                msg = 'Free proxy node not found'
+                handler_obj.send_error(code=httplib.SERVICE_UNAVAILABLE, message=msg)
+                return
+        else:
+            return func(handler_obj, *args, **kwargs)
+
+    return _wrapped
+
+
 def stat_request(func):
     @functools.wraps(func)
     def _wrapped(handler_obj, *args, **kwargs):
@@ -168,11 +247,13 @@ def stat_request(func):
                 handler_obj.server.stat_node['proxy_requests'] += 1
             handler_obj.server.lock.release()
         except socket.timeout:
-            print >> sys.stdout, 'socket timeout, fd %d' % handler_obj.connection.fileno()
+            msg = 'socket timeout, fd %d' % handler_obj.connection.fileno()
+            handler_obj.log_message(msg)
         except socket.error, ex:
             err_no = ex.args[0]
             if err_no == errno.EPIPE:
-                print >> sys.stdout, 'broken pipe, fd %d' % handler_obj.connection.fileno()
+                msg = 'broken pipe, fd %d' % handler_obj.connection.fileno()
+                handler_obj.log_message(msg)
             else:
                 raise ex
 
@@ -201,7 +282,7 @@ def test_proxy_node(down_node_list, node_host_port, proxy_node_auth_base64, time
         ]
         if proxy_node_auth_base64:
             chunks.append('Proxy-Authorization: Basic ' + proxy_node_auth_base64)
-        msg_http_req = '\r\n'.join(chunks) + '\r\n' * 2
+        msg_http_req = '\r\n'.join(chunks) + '\r\n\r\n'
 
         splits = node_host_port.split(':')
         if len(splits) == 2:
@@ -686,6 +767,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             self.close_connection = 1
             self.connection.close()
 
+    @property
+    def client_address_string(self):
+        return '%s:%d' % (self.client_address[0], self.client_address[1])
+
     def send_error(self, code, message=None):
         try:
             short, long = self.responses[code]
@@ -796,31 +881,36 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
     @stat_request
     @proxy_auth_required
-    def do_CONNECT(self):
+    @auto_slot_connect
+    def do_CONNECT(self, sock=None):
         """
         FIXME: node doesn't response in China network, re-product with
             curl -i --proxy localhost https://twitter.com
         """
-        host, port = self.path.split(':')
-        port = int(port)
+        if sock:
+            sock_dst = sock
+        else:
+            host, port = self.path.split(':')
+            port = int(port)
 
-        sock_dst = socket.socket()
-        hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(host)
-        ip_addr = random.choice(ipaddrlist)
+            hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(host)
+            ip_addr = random.choice(ipaddrlist)
 
-        try:
-            sock_dst.connect((ip_addr, port))
-        except socket.timeout:
-            return self.send_error(httplib.GATEWAY_TIMEOUT, message='Forwarding failure')
-        except socket.error, ex:
-            err_no = ex.args[0]
-            if err_no == errno.ECONNREFUSED:
-                return self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
-            raise ex
+            sock_dst = socket.socket()
+            try:
+                sock_dst.connect((ip_addr, port))
+            except socket.timeout:
+                return self.send_error(httplib.GATEWAY_TIMEOUT, message='Forwarding failure')
+            except socket.error, ex:
+                err_no = ex.args[0]
+                if err_no == errno.ECONNREFUSED:
+                    return self.send_error(httplib.SERVICE_UNAVAILABLE, message='Forwarding failure')
+                raise ex
 
-        self.send_response(httplib.OK, message='Connection established')
-        self.send_header('Proxy-Agent', self.server_version)
-        self.end_headers()
+            self.send_response(httplib.OK, message='Connection established')
+            self.send_header('Proxy-Agent', self.server_version)
+            self.end_headers()
+
 
         sock_src_shutdown, sock_dst_shutdown = False, False
         while (not sock_src_shutdown) and (not sock_dst_shutdown):
@@ -862,10 +952,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         else:
                             raise ex
                     if data:
-                        remain = SocketHelper.send(self.connection, data)
-                        if remain:
-                            msg = 'Target sent %d bytes to client, remain %d bytes' % (len(data), remain)
-                            self.log_message(msg)
+                        self.wfile.write(data)
+                        # remain = SocketHelper.send(self.connection, data)
+                        # if remain:
+                        #     msg = 'Target sent %d bytes to client, remain %d bytes' % (len(data), remain)
+                        #     self.log_message(msg)
                     else:
                         msg = 'Target sent nothing, it seems has disconnected'
                         self.log_message(msg)
