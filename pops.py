@@ -33,8 +33,8 @@ except ImportError:
 
 __version__ = "201408"
 
-SERVER_RECV_TEIMOUT = 3.0
-PROXY_SEND_RECV_TIMEOUT = 5.0
+SERVER_RECV_TEIMOUT = 10.0
+PROXY_SEND_RECV_TIMEOUT = 10.0
 
 RECV_BUF_SIZE = 8192
 
@@ -714,6 +714,7 @@ def handler_stat(handler_obj):
             stat_slot=handler_obj.server.stat_slot,
 
             settings_slot=handler_obj.server.settings_slot,
+            node_list_idx=handler_obj.server.node_list_idx.value,
             total_up_nodes=total_up_nodes,
 
             total_nodes=len(handler_obj.server.node_list),
@@ -834,6 +835,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         else:
                             item.update({top_domain_name: 1})
                         free_node_host_port = item['_host_port']
+                        self.server.node_list_idx.value += 1
                         break
                 else:
                     if item['_host_port'] == node_host_port:
@@ -847,8 +849,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         break
 
                 self.server.node_list[offset + idx] = item
-
-            self.server.node_list_idx.value += 1
         finally:
             self.server.lock.release()
 
