@@ -144,6 +144,9 @@ Stop
 
     git clone https://github.com/shuge/pops.git
     cp -r pops/html /var/www/
+    cd /var/www/
+
+    bower install # require node.js and bower install third-party JavaScript libraries
 
     # configure web server virtual-host instance and reload it
     # open http://virtual-host/dashboard.html
