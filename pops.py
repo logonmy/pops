@@ -362,14 +362,18 @@ def update_node_status(httpd_inst):
                 [t.join() for t in thread_list]
 
             time_e = time.time()
-            print >> sys.stdout, 'Test proxy nodes finished, total nodes %d in %f seconds' % (len(my_proxy_list), time_e - time_s)
+            msg = 'Test proxy nodes finished, total nodes %d in %f seconds' % \
+                  (len(my_proxy_list), time_e - time_s)
+            print >> sys.stdout, msg
 
             httpd_inst.lock.acquire()
             for idx in range(len(httpd_inst.node_list)):
                 item = httpd_inst.node_list[idx]
                 if item['_host_port'] in down_node_list:
                     item['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
-                    print >> sys.stdout, 'Test %s got %s, kick it from proxy list' % (item['_host_port'], down_node_list[item['_host_port']])
+                    msg = 'Test %s got %s, kick it from proxy list' % \
+                          (item['_host_port'], down_node_list[item['_host_port']])
+                    print >> sys.stdout, msg
                 else:
                     item['_status'] = ProxyNodeStatus.UP_AND_RUNNING
                 httpd_inst.node_list[idx] = item
