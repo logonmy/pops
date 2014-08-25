@@ -23,7 +23,11 @@ import urlparse
 import select
 
 import argparse
-from daemon import runner
+try:
+    from daemon import runner
+except ImportError:
+    if sys.platform in ['linux2', 'darwin']:
+        raise ImportError
 import re
 
 try:
@@ -31,7 +35,7 @@ try:
 except ImportError:
     color = None
 
-__version__ = "201408"
+__version__ = "201408-r2"
 
 SERVER_RECV_TEIMOUT = 10.0
 PROXY_SEND_RECV_TIMEOUT = 10.0
@@ -362,14 +366,18 @@ def update_node_status(httpd_inst):
                 [t.join() for t in thread_list]
 
             time_e = time.time()
-            print >> sys.stdout, 'Test proxy nodes finished, total nodes %d in %f seconds' % (len(my_proxy_list), time_e - time_s)
+            msg = 'Test proxy nodes finished, total nodes %d in %f seconds' % \
+                  (len(my_proxy_list), time_e - time_s)
+            print >> sys.stdout, msg
 
             httpd_inst.lock.acquire()
             for idx in range(len(httpd_inst.node_list)):
                 item = httpd_inst.node_list[idx]
                 if item['_host_port'] in down_node_list:
                     item['_status'] = ProxyNodeStatus.DELETED_OR_DOWN
-                    print >> sys.stdout, 'Test %s got %s, kick it from proxy list' % (item['_host_port'], down_node_list[item['_host_port']])
+                    msg = 'Test %s got %s, kick it from proxy list' % \
+                          (item['_host_port'], down_node_list[item['_host_port']])
+                    print >> sys.stdout, msg
                 else:
                     item['_status'] = ProxyNodeStatus.UP_AND_RUNNING
                 httpd_inst.node_list[idx] = item
@@ -817,28 +825,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         if not self.server.node_list:
             self.server.lock.release()
             return
-
-        using_specify_node = self.headers_case_sensitive.get_value('X-Using-Specify-Node')
-        if using_specify_node:
-            try:
-                msg = 'header X-Using-Specify-Node: %s found' % using_specify_node
-                self.log_message(msg)
-                for idx in range(len(self.server.node_list)):
-                    item = self.server.node_list[idx]
-                    if item['_host_port'] == using_specify_node:
-                        if item['_status'] > ProxyNodeStatus.DELETED_OR_DOWN:
-                            if top_domain_name in item:
-                                item[top_domain_name] += 1
-                            else:
-                                item.update({top_domain_name: 1})
-                            free_node_host_port = using_specify_node
-                        else:
-                            msg = 'User-agent specify node %s found, but its status is deleted or down' % using_specify_node
-                            self.log_message(msg)
-                        break
-            finally:
-                self.server.lock.release()
-            return free_node_host_port
 
         try:
             if (self.server.node_list_idx.value + 1) > len(self.server.node_list):
@@ -1298,14 +1284,6 @@ class MyDaemon(object):
         main(self.args)
 
 
-class MyDaemonRunner(runner.DaemonRunner):
-    def __init__(self, app, action):
-        self.action = action
-        runner.DaemonRunner.__init__(self, app)
-
-    def parse_args(self, *args, **kwargs): pass
-
-
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
@@ -1355,14 +1333,25 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.daemon or args.stop:
+        if sys.platform not in ['linux2', 'darwin']:
+            print >>sys.stderr, "This program could runs as daemon on linux and darwin only."
+            sys.exit(1)
+
         if not args.pid:
-            sys.stderr.write("You must set `--pid /path/to/pid` for `--daemon`.\n")
+            print >>sys.stderr, "You must set `--pid /path/to/pid` for `--daemon`.\n"
             sys.exit(1)
 
         if args.stop:
             action = 'stop'
         else:
             action = 'start'
+
+        class MyDaemonRunner(runner.DaemonRunner):
+            def __init__(self, app, action):
+                self.action = action
+                runner.DaemonRunner.__init__(self, app)
+
+            def parse_args(self, *args, **kwargs): pass
 
         d_runner = MyDaemonRunner(MyDaemon(args), action)
         d_runner.do_action()
