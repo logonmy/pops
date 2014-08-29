@@ -35,7 +35,7 @@ try:
 except ImportError:
     color = None
 
-__version__ = "201408-r4"
+__version__ = "201408-r5"
 
 SERVER_RECV_TEIMOUT = 10.0
 PROXY_SEND_RECV_TIMEOUT = 10.0
