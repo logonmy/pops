@@ -864,11 +864,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         return free_node_host_port
 
     def _do_GET_for_non_proxy_req(self):
-        map = dict(non_proxy_req_handler_list)
-        for path_in_re in map.keys():
+        urls_router = dict(non_proxy_req_handler_list)
+        for path_in_re in urls_router.keys():
             left_slash_stripped = self.path[1:]
             if re.compile(path_in_re).match(left_slash_stripped):
-                return map[path_in_re](self)
+                return urls_router[path_in_re](self)
         self.send_error(httplib.NOT_FOUND)
 
     def do_HEAD(self):
