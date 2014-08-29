@@ -35,10 +35,9 @@ try:
 except ImportError:
     color = None
 
-__version__ = "201408-r5"
+__version__ = "201408-r6"
 
 SERVER_RECV_TEIMOUT = 10.0
-PROXY_SEND_RECV_TIMEOUT = 10.0
 
 RECV_BUF_SIZE = 8192
 
@@ -345,7 +344,7 @@ def update_node_status(httpd_inst):
             httpd_inst.lock.release()
 
             down_node_list = dict()
-            node_test_max_concurrency = int(httpd_inst.settings_slot['node_test_max_concurrency'])
+            node_test_max_concurrency = int(httpd_inst.settings['node_test_max_concurrency'])
 
             time_s = time.time()
             print >> sys.stdout, 'Test proxy nodes started, node_test_max_concurrency = %d' % node_test_max_concurrency
@@ -359,7 +358,7 @@ def update_node_status(httpd_inst):
                                   down_node_list=down_node_list,
                                   node_host_port=proxy_node_parts[idx]['_host_port'],
                                   proxy_node_auth_base64=httpd_inst.proxy_node_auth_base64,
-                                  timeout=float(httpd_inst.settings_slot['node_kick_slow_than']))
+                                  timeout=float(httpd_inst.settings['node_kick_slow_than']))
                     t = threading.Thread(target=test_proxy_node, kwargs=kwargs)
                     thread_list.append(t)
                 [t.start() for t in thread_list]
@@ -383,7 +382,7 @@ def update_node_status(httpd_inst):
                 httpd_inst.node_list[idx] = item
             httpd_inst.lock.release()
 
-            time.sleep(float(httpd_inst.settings_slot['node_check_interval']))
+            time.sleep(float(httpd_inst.settings['node_check_interval']))
     finally:
         httpd_inst.server_close()
 
@@ -636,70 +635,65 @@ def fix_host_port(s):
 
 @auth_required
 def handler_admin(handler_obj):
-    if handler_obj.server.mode != 'slot':
-        handler_obj.send_error(httplib.NOT_FOUND)
-        # handler_obj.send_response(httplib.NOT_FOUND)
-        # handler_obj.send_header('Connection', 'close')
-        # handler_obj.end_headers()
-        return
-
     parse = urlparse.urlparse(handler_obj.path)
     qs_in_d = urlparse.parse_qs(parse.query)
 
-    if parse.path in ['/admin/node/add']:
-        addr_list = [i.strip() for i in qs_in_d['addr'][0].split(',')]
+    if handler_obj.server.mode == 'slot':
+        if parse.path in ['/admin/node/add']:
+            addr_list = [i.strip() for i in qs_in_d['addr'][0].split(',')]
 
-        handler_obj.server.lock.acquire()
+            handler_obj.server.lock.acquire()
 
-        for host_port in addr_list:
-            host_port = fix_host_port(host_port)
-            if parse.path == '/admin/node/add':
-                if not host_port_in_node_list(handler_obj.server.node_list, host_port):
-                    item = dict(
-                        _status=ProxyNodeStatus.UP_AND_RUNNING,
-                        _host_port=host_port,
-                    )
-                    handler_obj.server.node_list.append(item)
-                handler_obj.log_message('Appended %s into node list' % host_port)
+            for host_port in addr_list:
+                host_port = fix_host_port(host_port)
+                if parse.path == '/admin/node/add':
+                    if not host_port_in_node_list(handler_obj.server.node_list, host_port):
+                        item = dict(
+                            _status=ProxyNodeStatus.UP_AND_RUNNING,
+                            _host_port=host_port,
+                        )
+                        handler_obj.server.node_list.append(item)
+                    handler_obj.log_message('Appended %s into node list' % host_port)
 
-        handler_obj.server.lock.release()
+            handler_obj.server.lock.release()
 
-        handler_obj.send_response(httplib.OK)
-        handler_obj.send_header('Connection', 'close')
-        handler_obj.end_headers()
-        return
+            handler_obj.send_response(httplib.OK)
+            handler_obj.send_header('Connection', 'close')
+            handler_obj.end_headers()
+            return
 
-    elif parse.path == '/admin/node/delete':
-        addr_list = set([i.strip() for i in qs_in_d['addr'][0].split(',')])
+        elif parse.path == '/admin/node/delete':
+            addr_list = set([i.strip() for i in qs_in_d['addr'][0].split(',')])
 
-        handler_obj.server.lock.acquire()
+            handler_obj.server.lock.acquire()
 
-        for host_port in addr_list:
-            host_port = fix_host_port(host_port)
-            for item in handler_obj.server.node_list:
-                if item['_host_port'] == host_port:
-                    handler_obj.server.node_list.remove(item)
-                    handler_obj.log_message('Delete proxy node %s' % host_port)
+            for host_port in addr_list:
+                host_port = fix_host_port(host_port)
+                for item in handler_obj.server.node_list:
+                    if item['_host_port'] == host_port:
+                        handler_obj.server.node_list.remove(item)
+                        handler_obj.log_message('Delete proxy node %s' % host_port)
 
-        handler_obj.server.lock.release()
+            handler_obj.server.lock.release()
 
-        handler_obj.send_response(httplib.OK)
-        handler_obj.send_header('Connection', 'close')
-        handler_obj.end_headers()
-        return
+            handler_obj.send_response(httplib.OK)
+            handler_obj.send_header('Connection', 'close')
+            handler_obj.end_headers()
+            return
 
-    elif parse.path == '/admin/settings/update':
-        k, v = qs_in_d['k'][0], qs_in_d['v'][0]
+    elif handler_obj.server.mode == 'node':
+        if parse.path == '/admin/settings/update':
+            k, v = qs_in_d['k'][0], qs_in_d['v'][0]
 
-        handler_obj.server.lock.acquire()
-        if k in handler_obj.server.settings_slot:
-            handler_obj.server.settings_slot[k] = v
-        handler_obj.server.lock.release()
+            handler_obj.server.lock.acquire()
+            if k in handler_obj.server.settings:
+                handler_obj.server.settings[k] = v
+            handler_obj.server.lock.release()
 
-        handler_obj.send_response(httplib.OK)
-        handler_obj.send_header('Connection', 'close')
-        handler_obj.end_headers()
-        return
+            handler_obj.send_response(httplib.OK)
+            handler_obj.send_header('Connection', 'close')
+            handler_obj.end_headers()
+            return
 
     handler_obj.send_error(httplib.NOT_FOUND)
 
@@ -721,7 +715,7 @@ def handler_stat(handler_obj):
         migrated.update(dict(
             stat_slot=handler_obj.server.stat_slot,
 
-            settings_slot=handler_obj.server.settings_slot,
+            settings=handler_obj.server.settings,
             node_list_idx=handler_obj.server.node_list_idx.value,
             total_up_nodes=total_up_nodes,
 
@@ -859,7 +853,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 concurrency = item.get(top_domain_name, 0)
                 # this proxy allow to crawl records from this domain name in concurrency mode
                 if not node_host_port:
-                    if (concurrency < int(self.server.settings_slot['node_per_domain_max_concurrency'])) and \
+                    if (concurrency < int(self.server.settings['node_per_domain_max_concurrency'])) and \
                             (int(item['_status']) > ProxyNodeStatus.DELETED_OR_DOWN):
                         if top_domain_name in item:
                             item[top_domain_name] += 1
@@ -998,7 +992,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     @auto_slot
     def _forward_req(self, body=None, free_node_host_port=None):
         sock = socket.socket()
-        sock.settimeout(PROXY_SEND_RECV_TIMEOUT)
+        sock.settimeout(int(self.server.settings['proxy_send_recv_timeout']))
 
         if self.server.mode == 'slot':
             splits = free_node_host_port.split(':')
@@ -1269,11 +1263,12 @@ def main(args):
         error_log=error_log_path,
     ))
 
-    httpd_inst.settings_slot = httpd_inst.mp_manager.dict(dict(
+    httpd_inst.settings = httpd_inst.mp_manager.dict(dict(
         node_per_domain_max_concurrency=1,
         node_check_interval=60,
         node_kick_slow_than=5,
         node_test_max_concurrency=50,
+        proxy_send_recv_timeout=30,
     ))
 
     for i in range(processes):
