@@ -1213,6 +1213,7 @@ class POPServer(BaseHTTPServer.HTTPServer):
     args = None
     auth_base64 = None
     proxy_auth_base64 = None
+    proxy_node_auth_base64 = None
 
     @property
     def server_address_string(self):
