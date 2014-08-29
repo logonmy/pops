@@ -1045,7 +1045,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         self._forward_resp(sock, sock_addr)
 
     def _forward_resp(self, sock, sock_addr):
-        s = SocketHelper.recv_until(sock, '\r\n\r\n')
+        try:
+            s = SocketHelper.recv_until(sock, '\r\n\r\n')
+        except socket.timeout:
+            return self.send_error(httplib.GATEWAY_TIMEOUT)
+
         msg_resp = HTTPResponse(msg=s)
 
         line = msg_resp.first_line + '\r\n'
