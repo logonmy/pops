@@ -10,7 +10,7 @@ setup(
     license='MIT License',
     author='Shuge Lee',
     author_email='shuge.lee@gmail.com',
-    description='POPS is a simple HTTP proxy server and HTTP proxy slot server.',
+    description='POPS is a HTTP proxy server and HTTP proxy slot server.',
 
     platforms = ["Mac OS X", "Linux"],
 

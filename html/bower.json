@@ -1,0 +1,10 @@
+{
+  "name": "pops",
+  "dependencies": {
+    "bootstrap": "*",
+    "jquery": "*",
+    "moment": "*",
+    "underscore": "*",
+    "jquery.cookie": "*"
+  }
+}

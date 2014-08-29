@@ -5,18 +5,21 @@ POPS is a HTTP proxy server and HTTP proxy slot server.
 
 HTTP proxy server
 
-    client(s) ---> HTTP proxy server
+    user-agent(s) ---> HTTP proxy server
 
 
 HTTP proxy slot server
 
-    client(s) ---> pops A (acts as HTTP proxy slot server)-------> pops B (acts as HTTP proxy server node)
-                                                       |
-                                                       +---> pops C (acts as HTTP proxy server node)
-                                                       |
-                                                       +---> pops D (acts as HTTP proxy server node)
-                                                       |
-                                                       +...
+    user-agent(s) ---> pops A (acts as HTTP proxy slot server)
+                      |
+                      |
+                      +-------> pops B (acts as HTTP proxy server node)
+                     |
+                     +---> pops C (acts as HTTP proxy server node)
+                     |
+                     +---> pops D (acts as HTTP proxy server node)
+                     |
+                     +...
 
 Features
 
@@ -78,6 +81,11 @@ Show stat info
     curl --verbose --user admin:123 http://127.0.0.1:1080/stat/
 
 
+Start it without authentication requirement
+
+    pops.py --proxy_auth= --auth= --mode node
+
+
 ### POPS service mode: slot
 
 HTTP proxy slot server
@@ -106,9 +114,9 @@ Use it as normal HTTP proxy server, it will auto slot same domain into different
     curl --verbose --proxy-user 'user:123' --proxy 127.0.0.1:1080 http://tools.ietf.org/html/rfc1945.html
 
 
-### Others
+### Deployment in production
 
-Start it as daemon
+Start
 
     pops.py \
         --processes `python -c "import multiprocessing; multiprocessing.cpu_count()"` \
@@ -119,10 +127,35 @@ Start it as daemon
         --port 1080 \
         --daemon
 
+Stop
 
-Start it without authentication requirement
+    pops.py \
+        --processes `python -c "import multiprocessing; multiprocessing.cpu_count()"` \
+        --error_log `pwd`/pops.log  \
+        --pid `pwd`/pops.pid  \
+        --mode slot \
+        --addr 0.0.0.0 \
+        --port 1080 \
+        --daemon \
+        --stop
 
-    pops.py --proxy_auth= --auth= --mode node
+
+### Setup POPS dashboard(beta) for slot
+
+    git clone https://github.com/shuge/pops.git
+    cp -r pops/html /var/www/
+    cd /var/www/
+
+    bower install # require node.js and bower install third-party JavaScript libraries
+
+    # configure web server virtual-host instance and reload it
+    # open http://virtual-host/dashboard.html
+
+
+![](https://raw.githubusercontent.com/shuge/pops/master/html/dashboard.gif)
+
+
+NOTICE: update settings doesn't works right now.
 
 
 ## See also
