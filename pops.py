@@ -35,7 +35,7 @@ try:
 except ImportError:
     color = None
 
-__version__ = "201408-r3"
+__version__ = "201408-r4"
 
 SERVER_RECV_TEIMOUT = 10.0
 PROXY_SEND_RECV_TIMEOUT = 10.0
@@ -825,6 +825,28 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         if not self.server.node_list:
             self.server.lock.release()
             return
+
+        using_specify_node = self.headers_case_sensitive.get_value('X-Using-Specify-Node')
+        if using_specify_node:
+            try:
+                msg = 'header X-Using-Specify-Node: %s found' % using_specify_node
+                self.log_message(msg)
+                for idx in range(len(self.server.node_list)):
+                    item = self.server.node_list[idx]
+                    if item['_host_port'] == using_specify_node:
+                        if item['_status'] > ProxyNodeStatus.DELETED_OR_DOWN:
+                            if top_domain_name in item:
+                                item[top_domain_name] += 1
+                            else:
+                                item.update({top_domain_name: 1})
+                            free_node_host_port = using_specify_node
+                        else:
+                            msg = 'User-agent specify node %s found, but its status is deleted or down' % using_specify_node
+                            self.log_message(msg)
+                        break
+            finally:
+                self.server.lock.release()
+            return free_node_host_port
 
         try:
             if (self.server.node_list_idx.value + 1) > len(self.server.node_list):
