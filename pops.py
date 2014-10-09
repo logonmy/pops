@@ -904,6 +904,18 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         body = self.rfile.read(body_length)
         self._forward_req(body=body)
 
+    def do_OPTIONS(self):
+        return self.do_POST()
+
+    def do_PUT(self):
+        return self.do_POST()
+
+    def do_DELETE(self):
+        return self.do_POST()
+
+    def do_TRACE(self):
+        return self.do_POST()
+
     @stat_request
     @proxy_auth_required
     @auto_slot_connect
