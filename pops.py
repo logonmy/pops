@@ -43,7 +43,7 @@ RECV_BUF_SIZE = 8192
 
 
 class StringHelper(object):
-    MAX_LEN = 64
+    MAX_LEN = 140
 
     @staticmethod
     def cut_long_str_for_human(s):
@@ -52,6 +52,24 @@ class StringHelper(object):
             return s
         else:
             return '---%s...< %d bytes >...%s---' % (s[:5], s_len - 10, s[-5:])
+
+
+class HTTPHelper(object):
+
+    @staticmethod
+    def print_body(body, content_type=''):
+        if content_type == 'application/json':
+            try:
+                body_in_json = json.dumps(json.loads(body), indent=2)
+                print >>sys.stdout, body_in_json
+            except ValueError:
+                import traceback
+                traceback.print_exc(file=sys.stderr)
+
+            print >>sys.stdout, StringHelper.cut_long_str_for_human(body)
+        else:
+            print >>sys.stdout, StringHelper.cut_long_str_for_human(body)
+
 
 
 def print_io(a, b, dir, data):
@@ -181,7 +199,7 @@ def auto_slot_connect(func):
                     raise ex
 
 
-                msg = 'Forward request from user-agent %s to proxy node %s' % (handler_obj.client_address_string, node_host_port)
+                msg = 'Forward request from client %s to proxy node %s' % (handler_obj.client_address_string, node_host_port)
                 handler_obj.log_message(msg)
                 SocketHelper.send(sock, handler_obj.raw_requestline)
                 for item in handler_obj.headers_case_sensitive.headers:
@@ -196,7 +214,7 @@ def auto_slot_connect(func):
 
 
                 data = SocketHelper.recv_until(sock, '\r\n\r\n')
-                msg = 'Forward request from proxy node %s to user-agent %s' % (node_host_port, handler_obj.client_address_string)
+                msg = 'Forward request from proxy node %s to client %s' % (node_host_port, handler_obj.client_address_string)
                 handler_obj.log_message(msg)
                 msg_resp = HTTPResponse(msg=data)
 
@@ -750,8 +768,10 @@ non_proxy_req_handler_list = (
 
 
 class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
+    DEFAULT_PROTOCOL_VERSION = "HTTP/1.1"
+
     server_version = "POPS/" + __version__
-    protocol_version = "HTTP/1.1"
+    protocol_version = DEFAULT_PROTOCOL_VERSION
     sys_version = ""
 
     def setup(self):
@@ -972,7 +992,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                     if data:
                         remain = SocketHelper.send(sock_dst, data)
                         if remain:
-                            msg = 'Client sent %d bytes to target, remain %d bytes' % (len(data), remain)
+                            msg = 'Client sent %d bytes to server, remain %d bytes' % (len(data), remain)
                             self.log_message(msg)
                     else:
                         msg = 'Client sent nothing, it seems has disconnected'
@@ -995,7 +1015,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                         #     msg = 'Target sent %d bytes to client, remain %d bytes' % (len(data), remain)
                         #     self.log_message(msg)
                     else:
-                        msg = 'Target sent nothing, it seems has disconnected'
+                        msg = 'Server sent nothing, it seems has disconnected'
                         self.log_message(msg)
                         sock_dst_shutdown = True
 
@@ -1004,7 +1024,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     @auto_slot
     def _forward_req(self, body=None, free_node_host_port=None):
         if self.server.verbose:
-            print >>sys.stdout, ">>> request in raw with repr()"
+            print >>sys.stdout, ">>> request from client in raw repr()"
             print >>sys.stdout, repr(self.raw_requestline)
             for item in self.headers.headers:
                 print >>sys.stdout, repr(item)
@@ -1059,7 +1079,12 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             if parses.fragment:
                 request_uri += '#' + parses.fragment
 
-        request_line = '%s %s %s\r\n' % (self.command, request_uri, self.request_version)
+        if self.server.verbose and self.protocol_version < self.request_version:
+            request_version = self.protocol_version
+        else:
+            request_version = self.request_version
+
+        request_line = '%s %s %s\r\n' % (self.command, request_uri, request_version)
         SocketHelper.send(sock, request_line)
 
         for item in self.headers_case_sensitive.headers:
@@ -1091,10 +1116,10 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             return self.send_error(httplib.GATEWAY_TIMEOUT)
 
         if self.server.verbose:
-            print >>sys.stdout, '>>> response in raw with repr()'
+            print >>sys.stdout, '>>> response from server in repr()'
             print >>sys.stdout, repr(s)
             print >>sys.stdout, ''
-            print >>sys.stdout, '>>> response not in raw'
+            print >>sys.stdout, '>>> response from server not in repr()'
             print >>sys.stdout, s
             print >>sys.stdout, ''
 
@@ -1113,7 +1138,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             if cl is not None:
                 self._forward_resp_with_content_length(sock, sock_addr, msg_resp, int(cl))
             elif msg_resp.is_chunked():
-                msg = "Target server response body in chunked"
+                msg = "Server response body in chunked"
                 self.log_message(msg)
 
                 if self.request_version >= "HTTP/1.1":
@@ -1131,6 +1156,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     def _forward_resp_with_content_length(self, sock, sock_addr, msg_resp, cl):
         body = SocketHelper.recv_all(sock, cl)
 
+        if self.server.verbose:
+            print >>sys.stdout, '>>> body of response from server'
+            ct = self.headers_case_sensitive.get_value('Content-Type', default='')
+            HTTPHelper.print_body(body, content_type=ct)
+
         ts_ce = msg_resp.headers.get_value('Content-Encoding', default='')
         ua_ce = self.headers_case_sensitive.get_value('Accept-Encoding', default='')
 
@@ -1139,7 +1169,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             body = gz.read()
             msg_resp.headers.add_header('Content-Length', str(len(body)), override=True)
 
-            msg = "Target server response body in gzip, but client doesn't supports gzip"
+            msg = "Server response body in gzip, but client doesn't supports gzip"
             self.log_message(msg)
 
         msg_resp.headers.filter_headers(HTTPHeadersCaseSensitive.HOP_BY_HOP_HEADERS)
@@ -1162,7 +1192,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             using_gzip = False
             msg_resp.headers.filter_headers(('Content-Encoding', ))
 
-            msg = "Target server response body in gzip, and client doesn't supports gzip"
+            msg = "Server response body in gzip, and client doesn't supports gzip"
             self.log_message(msg)
 
         for item in msg_resp.headers.headers:
@@ -1192,7 +1222,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             using_gzip = False
             msg_resp.headers.filter_headers(('Content-Encoding', ))
 
-            msg = "Target server response body in gzip, and client doesn't supports gzip"
+            msg = "Server response body in gzip, and client doesn't supports gzip"
             self.log_message(msg)
 
         chunk_data_list = []
@@ -1210,6 +1240,11 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             k, v = item[0], item[1]
             self.send_header(k, v)
         self.end_headers()
+
+        if self.server.verbose:
+            ct = self.headers_case_sensitive.get_value('Content-Type', default='')
+            HTTPHelper.print_body(body, content_type=ct)
+
         self.wfile.write(body)
 
     def _forward_resp_no_content_length_and_no_chunked(self, sock, sock_addr, msg_resp):
@@ -1262,6 +1297,9 @@ def main(args):
     httpd_inst.mode = args.mode
 
     httpd_inst.verbose = args.verbose and processes == 0
+
+    if getattr(args, 'http1.0'):
+        httpd_inst.RequestHandlerClass.protocol_version = 'HTTP/1.0'
 
     if args.auth:
         httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
@@ -1379,7 +1417,11 @@ if __name__ == "__main__":
 
     parser.add_argument('--verbose',
                         action='store_true',
-                        help='dump request and response message into stdout, it requires --processes=0')
+                        help='dump headers of request and response into stdout, it requires --processes=0')
+
+    parser.add_argument('--http1.0',
+                        action='store_true',
+                        help='dump entry body of request and response into stdout, it requires --verbose')
 
     parser.add_argument('--error_log',
                         help='default /dev/null')
@@ -1393,6 +1435,10 @@ if __name__ == "__main__":
                         help='default start')
 
     args = parser.parse_args()
+
+
+    if getattr(args, 'http1.0') and not args.verbose:
+        raise Exception('option http1.0 requires --verbose')
 
     if args.verbose and int(args.processes) != 0:
         raise Exception('option verbose requires --processes=0')
