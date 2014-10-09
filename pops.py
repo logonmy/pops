@@ -1003,6 +1003,12 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
     @proxy_auth_required
     @auto_slot
     def _forward_req(self, body=None, free_node_host_port=None):
+        if self.server.verbose:
+            print >>sys.stdout, ">>> request in raw with repr()"
+            print >>sys.stdout, repr(self.raw_requestline)
+            for item in self.headers.headers:
+                print >>sys.stdout, repr(item)
+
         sock = socket.socket()
         sock.settimeout(int(self.server.settings['proxy_send_recv_timeout']))
 
@@ -1054,7 +1060,6 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
                 request_uri += '#' + parses.fragment
 
         request_line = '%s %s %s\r\n' % (self.command, request_uri, self.request_version)
-
         SocketHelper.send(sock, request_line)
 
         for item in self.headers_case_sensitive.headers:
@@ -1063,12 +1068,19 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
         if self.server.mode == 'slot' and self.server.proxy_node_auth_base64:
             line = 'Proxy-Authorization: Basic %s\r\n' % self.server.proxy_node_auth_base64
+            if self.server.verbose:
+                print >>sys.stdout, repr(line)
             SocketHelper.send(sock, line)
 
         SocketHelper.send(sock, '\r\n')
 
         if body:
+            if self.server.verbose:
+                print >>sys.stdout, repr(body)
+                print >>sys.stdout, ''
             SocketHelper.send(sock, body)
+        else:
+            print >>sys.stdout, ''
 
         self._forward_resp(sock, sock_addr)
 
@@ -1077,6 +1089,14 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             s = SocketHelper.recv_until(sock, '\r\n\r\n')
         except socket.timeout:
             return self.send_error(httplib.GATEWAY_TIMEOUT)
+
+        if self.server.verbose:
+            print >>sys.stdout, '>>> response in raw with repr()'
+            print >>sys.stdout, repr(s)
+            print >>sys.stdout, ''
+            print >>sys.stdout, '>>> response not in raw'
+            print >>sys.stdout, s
+            print >>sys.stdout, ''
 
         msg_resp = HTTPResponse(msg=s)
 
@@ -1221,6 +1241,8 @@ class POPServer(BaseHTTPServer.HTTPServer):
     proxy_auth_base64 = None
     proxy_node_auth_base64 = None
 
+    verbose = None
+
     @property
     def server_address_string(self):
         return '%s:%d' % (self.server_address[0], self.server_address[1])
@@ -1238,6 +1260,8 @@ def main(args):
 
     httpd_inst = POPServer(server_address, HandlerClass)
     httpd_inst.mode = args.mode
+
+    httpd_inst.verbose = args.verbose and processes == 0
 
     if args.auth:
         httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
@@ -1353,6 +1377,10 @@ if __name__ == "__main__":
                         default=multiprocessing.cpu_count(),
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
 
+    parser.add_argument('--verbose',
+                        action='store_true',
+                        help='dump request and response message into stdout, it requires --processes=0')
+
     parser.add_argument('--error_log',
                         help='default /dev/null')
 
@@ -1365,6 +1393,9 @@ if __name__ == "__main__":
                         help='default start')
 
     args = parser.parse_args()
+
+    if args.verbose and int(args.processes) != 0:
+        raise Exception('option verbose requires --processes=0')
 
     if args.daemon or args.stop:
         if sys.platform not in ['linux2', 'darwin']:
