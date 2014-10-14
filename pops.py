@@ -548,7 +548,7 @@ class HTTPMessage(object):
     def parse_msg(self):
         splits = self.raw.split('\r\n\r\n')
         if len(splits) == 2:
-            first_line_headers, body = splits[0], splits[1]
+            first_line_headers, self.body = splits[0], splits[1]
         else:
             first_line_headers = splits[0]
 
