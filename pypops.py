@@ -117,8 +117,27 @@ class HTTPHelper(object):
             host, port = splits[0], 80
         return (host, port)
 
+    @staticmethod
+    def absoluteURI2abs_path(msg_req):
+        """
+        translate absoluteURI to abs_path
+        """
+        parses = urlparse.urlparse(msg_req.request_uri)
+        request_uri = HTTPHelper.parse_request_uri_from_urlparse(parses)
+        first_line = msg_req.method + ' ' + request_uri + ' ' + msg_req.version
+        lines = [first_line]
+        for item in msg_req.headers.headers:
+            line = '%s: %s' % (item[0], item[1])
+            lines.append(line)
+        msg = '\r\n'.join(lines) + EOL + msg_req.body or ''
+        return msg
+
 
 EOL = '\r\n\r\n'
+
+def print_msg(msg, msg_type):
+    print '>>> %s' % msg_type
+    print msg
 
 
 class ProxySender(asynchat.async_chat):
@@ -140,8 +159,7 @@ class ProxySender(asynchat.async_chat):
         self.msg_resp = None
 
     def handle_connect(self):
-        if self.server.args.verbose:
-            print >>sys.stdout, 'connect to', self.addr_server_formatted
+        pass
 
     def collect_incoming_data(self, data):
         self.raw_msg += data
@@ -150,36 +168,48 @@ class ProxySender(asynchat.async_chat):
         terminator = self.get_terminator()
 
         if self.server.args.verbose:
-            print >>sys.stdout, 'sender terminator', repr(terminator)
+            print
+            print '>>> sender terminator', repr(terminator)
 
         if isinstance(terminator, basestring):
             self.raw_msg += EOL
 
-            if self.server.args.verbose:
-                print >>sys.stdout, ' ', repr(StringHelper.cut_long_str_for_human(self.raw_msg))
-
             self.msg_resp = HTTPResponse(msg=self.raw_msg)
-            cl = self.msg_resp.headers.get_value('Content-Length')
-            # if self.receiver.msg_req.method != 'HEAD' and \
-            #                 self.msg_resp.status_code >= httplib.OK and \
-            #                 self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.SEE_OTHER, httplib.NOT_MODIFIED):
-            #     cl = self.msg_resp.headers.get_value('Content-Length')
-            if cl is not None:
-                cl = int(cl)
-                if cl > 0:
-                    self.set_terminator(cl)
+
+            if self.receiver.msg_req.method != 'HEAD' and \
+                            self.msg_resp.status_code >= httplib.OK and \
+                            self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
+                cl = self.msg_resp.headers.get_value('Content-Length')
+                if cl is not None:
+                    cl = int(cl)
+                    if cl > 0:
+                        self.set_terminator(cl)
+                    else:
+                        self.set_terminator(None)
+
+                        if self.server.args.verbose:
+                            print_msg(msg=self.raw_msg, msg_type='response')
+
+                        self.receiver.push(self.raw_msg)
+                elif self.msg_resp.is_chunked():
+                    raise NotImplementedError
                 else:
+                    if self.server.args.verbose:
+                        print_msg(msg=self.raw_msg, msg_type='response')
+
                     self.receiver.push(self.raw_msg)
-            elif self.msg_resp.is_chunked():
-                raise NotImplementedError
             else:
-                self.set_terminator(None)
+                if self.server.args.verbose:
+                    print_msg(msg=self.raw_msg, msg_type='response')
+
+                self.receiver.push(self.raw_msg)
+
 
         elif isinstance(terminator, int) or isinstance(terminator, long):
             self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
             if self.server.args.verbose:
-                print >>sys.stdout, ' ', repr(StringHelper.cut_long_str_for_human(self.raw_msg))
+                print_msg(msg=self.raw_msg, msg_type='response')
 
             if terminator is 0:
                 self.receiver.push(self.raw_msg)
@@ -220,18 +250,20 @@ class ProxyReceiver(asynchat.async_chat):
         terminator = self.get_terminator()
 
         if self.server.args.verbose:
-            print >>sys.stdout, 'receiver terminator:', repr(terminator)
+            print
+            print '>>> receiver terminator:', repr(terminator)
 
         if isinstance(terminator, basestring):
             self.raw_msg += EOL
 
             if self.server.args.verbose:
-                print >>sys.stdout, ' ', repr(StringHelper.cut_long_str_for_human(self.raw_msg))
+                print_msg(msg=self.raw_msg, msg_type='request')
 
             self.msg_req = HTTPRequest(self.raw_msg)
 
             if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
                 msg = generate_resp(code=httplib.BAD_REQUEST)
+                print_msg(msg=msg, msg_type='response')
                 self.push(msg)
                 return
 
@@ -243,29 +275,29 @@ class ProxyReceiver(asynchat.async_chat):
             if cl is not None:
                 self.set_terminator(int(cl))
             else:
-                self.sender.push(self.raw_msg)
+                self.set_terminator(None)
+
+                msg = HTTPHelper.absoluteURI2abs_path(self.msg_req)
+
+                if self.server.args.verbose:
+                    print_msg(msg=msg, msg_type='request(rewritten)')
+
+                self.sender.push(msg)
 
         elif isinstance(terminator, int) or isinstance(terminator, long):
             if self.server.args.verbose:
-                print >>sys.stdout, ' ', repr(StringHelper.cut_long_str_for_human(self.raw_msg))
+                print_msg(msg=self.raw_msg, msg_type='request')
 
             self.msg_req = HTTPRequest(self.raw_msg)
+            msg = HTTPHelper.absoluteURI2abs_path(self.msg_req)
 
-            # translate absoluteURI to abs_path
-            parses = urlparse.urlparse(self.msg_req.request_uri)
-            request_uri = HTTPHelper.parse_request_uri_from_urlparse(parses)
-            first_line = self.msg_req.method + ' ' + request_uri + ' ' + self.msg_req.version
-            lines = [first_line]
-            for item in self.msg_req.headers.headers:
-                line = '%s: %s' % (item[0], item[1])
-                lines.append(line)
-            msg = '\r\n'.join(lines) + EOL + self.msg_req.body or ''
+            if self.server.args.verbose:
+                print_msg(msg=msg, msg_type='request(rewritten)')
 
             if terminator is 0:
                 self.sender.push(msg)
             else:
                 self.sender.push(msg)
-                print 'WARNING: remain %d bytes' % terminator
                 print >>sys.stderr, 'WARNING: %s received bytes less than expected, remain %d bytes in client' % (self, terminator)
 
 
@@ -279,6 +311,9 @@ class HTTPServer(asyncore.dispatcher):
     allow_reuse_address = True
     request_queue_size = 5
 
+    DEFAULT_PROTOCOL_VERSION = "HTTP/1.1"
+    protocol_version = DEFAULT_PROTOCOL_VERSION
+    server_version = "POPS/" + __version__
     args = None
 
     def __init__(self, server_address, RequestHandlerClass):
@@ -336,6 +371,9 @@ def main(args):
 
     httpd_inst = HTTPServer(server_address, ProxyReceiver)
     httpd_inst.args = args
+
+    if getattr(args, 'http1.0'):
+        httpd_inst.protocol_version = 'HTTP/1.0'
 
     if httpd_inst.args.mode == 'node':
         srv_name = 'node'
