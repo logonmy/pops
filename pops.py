@@ -535,17 +535,19 @@ class HTTPHeadersCaseSensitive(object):
 
 
 class HTTPMessage(object):
-    def __init__(self, msg):
+    def __init__(self, msg, ignores_headers=None):
         self.raw = msg
         self.first_line = None
         self.headers = None
         self.body = None
-        self.parse_msg()
+        if not ignores_headers:
+            ignores_headers = []
+        self.parse_msg(ignores_headers)
 
     def parse_first_line(self):
         pass
 
-    def parse_msg(self):
+    def parse_msg(self, ignores_headers):
         splits = self.raw.split('\r\n\r\n')
         if len(splits) == 2:
             first_line_headers, self.body = splits[0], splits[1]
@@ -554,7 +556,7 @@ class HTTPMessage(object):
 
         lines = [i for i in first_line_headers.split('\r\n') if i]
         self.first_line = lines[0]
-        self.headers = HTTPHeadersCaseSensitive(lines=lines[1:])
+        self.headers = HTTPHeadersCaseSensitive(lines=lines[1:], ignores=ignores_headers)
 
     def is_chunked(self):
         cl = self.headers.get_value('Content-Length')
@@ -578,6 +580,14 @@ class HTTPMessage(object):
             chunk_data = SocketHelper.recv_all(fd, chunk_size)
             SocketHelper.recv_all(fd, 2) # skip CRLF
             yield chunk_data
+
+    def __str__(self):
+        lines = [self.first_line]
+        for item in self.headers.headers:
+            lines.append('%s: %s' % (item[0], item[1]))
+        body = self.body or ''
+        msg = '\r\n'.join(lines) + '\r\n\r\n' + body
+        return msg
 
 
 class HTTPRequest(HTTPMessage):
