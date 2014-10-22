@@ -2,9 +2,11 @@
 #-*- coding:utf-8 -*-
 from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
+import StringIO
 import argparse
 import asynchat
 import asyncore
+import gzip
 import httplib
 import multiprocessing
 import os
@@ -20,6 +22,7 @@ except ImportError:
 
 from pops import HTTPRequest
 from pops import HTTPResponse
+from pops import HTTPHeadersCaseSensitive
 
 
 __version__ = "201410"
@@ -118,19 +121,45 @@ class HTTPHelper(object):
         return (host, port)
 
     @staticmethod
-    def absoluteURI2abs_path(msg_req):
+    def rewriteReqForProxy(msg_req):
         """
         translate absoluteURI to abs_path
+        filter headers for forward request
         """
+        HEADERS_DROP_FOR_PROXY = ('Proxy-Connection', )
+        HEADERS_DROP = HTTPHeadersCaseSensitive.HOP_BY_HOP_HEADERS + HEADERS_DROP_FOR_PROXY
+
         parses = urlparse.urlparse(msg_req.request_uri)
         request_uri = HTTPHelper.parse_request_uri_from_urlparse(parses)
         first_line = msg_req.method + ' ' + request_uri + ' ' + msg_req.version
         lines = [first_line]
         for item in msg_req.headers.headers:
+            k_lower = item[0]
+            if HTTPHeadersCaseSensitive.contains(HEADERS_DROP, k_lower):
+                continue
             line = '%s: %s' % (item[0], item[1])
             lines.append(line)
-        msg = '\r\n'.join(lines) + EOL + msg_req.body or ''
+        body = msg_req.body or ''
+        msg = '\r\n'.join(lines) + EOL + body
         return msg
+
+    @staticmethod
+    def rewriteResp(msg_resp, ignore_headers=None):
+        """
+        filter headers for forward request
+        """
+        if not ignore_headers:
+            ignore_headers = []
+
+        lines = [msg_resp.first_line]
+        for item in msg_resp.headers.headers:
+            k_lower = item[0]
+            if HTTPHeadersCaseSensitive.contains(ignore_headers, k_lower):
+                continue
+            line = '%s: %s' % (item[0], item[1])
+            lines.append(line)
+        header = '\r\n'.join(lines) + EOL
+        return header
 
 
 EOL = '\r\n\r\n'
@@ -157,12 +186,19 @@ class ProxySender(asynchat.async_chat):
 
         self.raw_msg = ''
         self.msg_resp = None
+        self.reading_chunk = False
+        self.chunks = []
+        self.forward_resp_in_chunked_for_ge_http11 = None
+        self._forward_resp_in_chunked_for_lt_http11 = None
 
     def handle_connect(self):
         pass
 
     def collect_incoming_data(self, data):
-        self.raw_msg += data
+        if not self.reading_chunk:
+            self.raw_msg += data
+        else:
+            self.raw_msg += data
 
     def found_terminator(self):
         terminator = self.get_terminator()
@@ -172,54 +208,133 @@ class ProxySender(asynchat.async_chat):
             print '>>> sender terminator', repr(terminator)
 
         if isinstance(terminator, basestring):
-            self.raw_msg += EOL
+            if not self.reading_chunk:
+                self._handle_header()
+            else:
+                self._handle_body_in_chunked()
 
-            self.msg_resp = HTTPResponse(msg=self.raw_msg)
+        elif isinstance(terminator, (int, long)):
+            if not self.reading_chunk:
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
-            if self.receiver.msg_req.method != 'HEAD' and \
-                            self.msg_resp.status_code >= httplib.OK and \
-                            self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
-                cl = self.msg_resp.headers.get_value('Content-Length')
-                if cl is not None:
-                    cl = int(cl)
-                    if cl > 0:
-                        self.set_terminator(cl)
-                    else:
-                        self.set_terminator(None)
+                if self.server.args.verbose:
+                    print_msg(msg=self.raw_msg, msg_type='response')
 
-                        if self.server.args.verbose:
-                            print_msg(msg=self.raw_msg, msg_type='response')
-
-                        self.receiver.push(self.raw_msg)
-                elif self.msg_resp.is_chunked():
-                    raise NotImplementedError
+                if terminator is 0:
+                    self.receiver.push(self.raw_msg)
                 else:
+                    self.receiver.push(self.raw_msg)
+                    print >>sys.stderr, 'WARNING: %s received bytes less than expected, remain %d bytes in server' % (self, terminator)
+            else:
+                self._handle_body_in_chunked()
+
+    def handle_close(self):
+        self.receiver.close()
+        self.close()
+
+
+    def _handle_header(self):
+        terminator = self.get_terminator()
+        self.raw_msg += terminator
+
+        self.msg_resp = HTTPResponse(msg=self.raw_msg)
+
+        if self.receiver.msg_req.method != 'HEAD' and \
+                        self.msg_resp.status_code >= httplib.OK and \
+                        self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
+            cl = self.msg_resp.headers.get_value('Content-Length')
+            if cl is not None:
+                cl = int(cl)
+                if cl > 0:
+                    self.set_terminator(cl)
+                else:
+                    self.set_terminator(EOL)
+
                     if self.server.args.verbose:
                         print_msg(msg=self.raw_msg, msg_type='response')
 
                     self.receiver.push(self.raw_msg)
+            elif self.msg_resp.is_chunked():
+
+                if self.receiver.msg_req.version >= "HTTP/1.1":
+
+                    self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
+
+                    msg = str(self.msg_resp)
+
+                    if self.server.args.verbose:
+                        print_msg(msg=msg, msg_type='response')
+
+                    self.receiver.push(msg)
+                    self.raw_msg = ''
+
+                    self.forward_resp_in_chunked_for_ge_http11 = True
+                else:
+                    msg = HTTPHelper.rewriteResp(msg_resp=self.msg_resp, ignore_headers=['Transfer-Encoding'])
+
+                    if self.server.args.verbose:
+                        print_msg(msg=msg, msg_type='response')
+
+                    self.receiver.push(msg)
+                    self.raw_msg = ''
+
+                    self._forward_resp_in_chunked_for_lt_http11 = True
+
+                self.reading_chunk = True
+                self.set_terminator('\r\n')
             else:
                 if self.server.args.verbose:
                     print_msg(msg=self.raw_msg, msg_type='response')
 
                 self.receiver.push(self.raw_msg)
-
-
-        elif isinstance(terminator, int) or isinstance(terminator, long):
-            self.msg_resp = HTTPResponse(msg=self.raw_msg)
-
+        else:
             if self.server.args.verbose:
                 print_msg(msg=self.raw_msg, msg_type='response')
 
-            if terminator is 0:
-                self.receiver.push(self.raw_msg)
-            else:
-                self.receiver.push(self.raw_msg)
-                print >>sys.stderr, 'WARNING: %s received bytes less than expected, remain %d bytes in server' % (self, terminator)
+            self.receiver.push(self.raw_msg)
 
-    def handle_close(self):
-        self.receiver.close()
-        self.close()
+    def _handle_body_in_chunked(self):
+        if self.forward_resp_in_chunked_for_ge_http11:
+            data = self.raw_msg + '\r\n'
+
+            if self.server.args.verbose:
+                print_msg(msg=repr(data), msg_type='response(chunk)')
+
+            self.receiver.push(data)
+            self.raw_msg = ''
+
+        elif self._forward_resp_in_chunked_for_lt_http11:
+            terminator = self.get_terminator()
+
+            if isinstance(terminator, basestring):
+                chunk = self.chunks[-1]
+                self.chunks.append(self.raw_msg)
+                self.raw_msg = ''
+
+                splits = chunk.rstrip('\r\n').split(';')
+                chunk_size = int(splits[0], 16)
+
+                if len(splits) > 1:
+                    chunk_ext_list = splits[1:]
+
+                if chunk_size is 0: # last-chunk
+                    self.set_terminator('\r\n')
+
+                    gz = gzip.GzipFile(fileobj=StringIO.StringIO(''.join(self.chunks)))
+                    body = gz.read()
+
+                    print_msg(msg=body, msg_type='response')
+                    self.receiver.push(body)
+
+                    self.set_terminator(EOL)
+                    self.reading_chunk = False
+                else:
+                    self.set_terminator(chunk_size)
+
+            elif isinstance(terminator, (int, long)):
+                self.set_terminator(EOL)
+            else:
+                print >>sys.stderr, 'got unexpected terminator', repr(terminator)
 
 
 class ProxyReceiver(asynchat.async_chat):
@@ -275,9 +390,9 @@ class ProxyReceiver(asynchat.async_chat):
             if cl is not None:
                 self.set_terminator(int(cl))
             else:
-                self.set_terminator(None)
+                self.set_terminator(EOL)
 
-                msg = HTTPHelper.absoluteURI2abs_path(self.msg_req)
+                msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
 
                 if self.server.args.verbose:
                     print_msg(msg=msg, msg_type='request(rewritten)')
@@ -289,7 +404,7 @@ class ProxyReceiver(asynchat.async_chat):
                 print_msg(msg=self.raw_msg, msg_type='request')
 
             self.msg_req = HTTPRequest(self.raw_msg)
-            msg = HTTPHelper.absoluteURI2abs_path(self.msg_req)
+            msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
 
             if self.server.args.verbose:
                 print_msg(msg=msg, msg_type='request(rewritten)')
