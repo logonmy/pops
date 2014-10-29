@@ -1,5 +1,6 @@
-#!/usr/bin/env python
-#-*- coding:utf-8 -*-
+"""
+Rewritten pops in asyncore, select.poll should better select.select.
+"""
 from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
 import StringIO
@@ -442,7 +443,10 @@ class HTTPServer(asyncore.dispatcher):
         self.listen(self.request_queue_size)
 
     def serve_forever(self):
-        asyncore.loop()
+        if sys.platform == 'linux2' or self.args.poll:
+            asyncore.loop(use_poll=True)
+        else:
+            asyncore.loop()
 
     def server_close(self):
         self.close()
@@ -490,10 +494,7 @@ def main(args):
     if getattr(args, 'http1.0'):
         httpd_inst.protocol_version = 'HTTP/1.0'
 
-    if httpd_inst.args.mode == 'node':
-        srv_name = 'node'
-    else:
-        srv_name = 'slot'
+    srv_name = 'node'
     print >> sys.stdout, "POPS %s started, listen on %s:%s, pid %d" % (srv_name, server_address[0], server_address[1], pid)
     try:
         httpd_inst.serve_forever()
@@ -505,18 +506,6 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS', version=__version__)
 
-    parser.add_argument('--auth',
-                        default='god:hidemyass',
-                        help='default god:hidemyass')
-
-    parser.add_argument('--proxy_auth',
-                        default='god:hidemyass',
-                        help='default god:hidemyass')
-
-    parser.add_argument('--proxy_node_auth',
-                        default='god:hidemyass',
-                        help='default god:hidemyass')
-
     parser.add_argument('--addr',
                         default='127.0.0.1',
                         help='default 127.0.0.1')
@@ -526,14 +515,9 @@ if __name__ == "__main__":
                         default=1080,
                         help='default 1080')
 
-    parser.add_argument('--mode',
-                        choices=['slot', 'node'],
-                        default='node',
-                        help='default node')
-
     parser.add_argument('--verbose',
                         action='store_true',
-                        help='dump headers of request and response into stdout, it requires --processes=0')
+                        help='dump headers of request and response into stdout')
 
     parser.add_argument('--http1.0',
                         action='store_true',
@@ -545,6 +529,8 @@ if __name__ == "__main__":
     parser.add_argument('--pid')
 
     parser.add_argument('--daemon', action='store_true')
+
+    parser.add_argument('--poll', action='store_true')
 
     parser.add_argument('--stop',
                         action='store_true',
