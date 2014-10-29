@@ -1,5 +1,8 @@
 """
 Rewritten pops in asyncore, select.poll should better select.select.
+
+Someone provider patch epoll for asyncore, it doesn't works as expected.
+http://bugs.python.org/issue6692
 """
 from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
