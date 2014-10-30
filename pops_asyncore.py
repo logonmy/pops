@@ -8,8 +8,8 @@ from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
 import StringIO
 import argparse
+import asyncore_patch as asyncore
 import asynchat
-import asyncore
 import gzip
 import httplib
 import multiprocessing
@@ -175,8 +175,8 @@ def print_msg(msg, msg_type):
 
 class ProxySender(asynchat.async_chat):
 
-    def __init__(self, proxy_receiver, addr_server):
-        asynchat.async_chat.__init__(self)
+    def __init__(self, proxy_receiver, addr_server, map):
+        asynchat.async_chat.__init__(self, map=map)
 
         self.receiver = proxy_receiver
         self.server = proxy_receiver.server
@@ -344,8 +344,8 @@ class ProxySender(asynchat.async_chat):
 class ProxyReceiver(asynchat.async_chat):
     channel_counter = 0
 
-    def __init__(self, server, (sock_client, addr_client)):
-        asynchat.async_chat.__init__ (self, sock_client)
+    def __init__(self, server, (sock_client, addr_client), map):
+        asynchat.async_chat.__init__ (self, sock=sock_client, map=map)
 
         self.server = server
 
@@ -421,7 +421,7 @@ class ProxyReceiver(asynchat.async_chat):
 
 
     def _setup_sender(self, addr):
-        self.sender = ProxySender(self, addr)
+        self.sender = ProxySender(self, addr, self._map)
         self.sender.id = self.id
 
 
@@ -446,23 +446,30 @@ class HTTPServer(asyncore.dispatcher):
         self.listen(self.request_queue_size)
 
     def serve_forever(self):
-        if sys.platform == 'linux2' or self.args.poll:
-            asyncore.loop(use_poll=True)
-        else:
-            asyncore.loop()
+        asyncore.loop(use_select=self.args.select)
 
     def server_close(self):
         self.close()
 
     def handle_accept(self):
-        sock_client, addr_client = self.accept()
+        """
+        walk around problem Thundering herd
+        """
+
+        # print 'pid:%d awake' % os.getpid()
+        _ = self.accept()
+        if not _:
+            return
+        # print 'pid:%d hit' % os.getpid()
+
+        sock_client, addr_client = _[0], _[1]
 
         if self.args.verbose:
             addr_client_formatted = ':'.join(str(i) for i in addr_client)
             msg = addr_client_formatted + ' connected'
             print >>sys.stdout, msg
 
-        self.RequestHandlerClass(self, (sock_client, addr_client))
+        self.RequestHandlerClass(self, (sock_client, addr_client), self._map)
 
         
 class MyDaemon(object):
@@ -488,7 +495,7 @@ def serve_forever(httpd_inst):
 
 def main(args):
     server_address = (args.addr, args.port)
-    
+    processes = int(args.processes)
     pid = os.getpid()
 
     httpd_inst = HTTPServer(server_address, ProxyReceiver)
@@ -496,6 +503,12 @@ def main(args):
 
     if getattr(args, 'http1.0'):
         httpd_inst.protocol_version = 'HTTP/1.0'
+
+    for i in range(processes):
+        p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
+        if args.daemon:
+            p.daemon = args.daemon
+        p.start()
 
     srv_name = 'node'
     print >> sys.stdout, "POPS %s started, listen on %s:%s, pid %d" % (srv_name, server_address[0], server_address[1], pid)
@@ -518,6 +531,10 @@ if __name__ == "__main__":
                         default=1080,
                         help='default 1080')
 
+    parser.add_argument('--processes',
+                        default=multiprocessing.cpu_count(),
+                        help='default cat /proc/cpuinfo | grep processor | wc -l')
+
     parser.add_argument('--verbose',
                         action='store_true',
                         help='dump headers of request and response into stdout')
@@ -533,7 +550,7 @@ if __name__ == "__main__":
 
     parser.add_argument('--daemon', action='store_true')
 
-    parser.add_argument('--poll', action='store_true')
+    parser.add_argument('--select', action='store_true')
 
     parser.add_argument('--stop',
                         action='store_true',
