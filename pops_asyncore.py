@@ -1,8 +1,8 @@
 """
-Rewritten pops in asyncore, select.poll should better select.select.
+Rewritten pops in asyncore with epoll patch.
 
-Someone provider patch epoll for asyncore, it doesn't works as expected.
-http://bugs.python.org/issue6692
+See also:
+ - http://bugs.python.org/issue6692
 """
 from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
@@ -30,7 +30,7 @@ from pops import HTTPResponse
 from pops import HTTPHeadersCaseSensitive
 
 
-__version__ = "201410"
+__version__ = "201411"
 
 
 format_addr = lambda addr : ':'.join(str(i) for i in addr)
