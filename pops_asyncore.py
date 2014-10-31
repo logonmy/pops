@@ -8,7 +8,8 @@ from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
 import StringIO
 import argparse
-import asyncore_patch as asyncore
+import asyncore_patch
+import asyncore
 import asynchat
 import gzip
 import httplib
