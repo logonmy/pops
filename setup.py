@@ -16,6 +16,7 @@ setup(
 
     scripts = [
         "pops.py",
+        "pops_asyncore.py",
     ],
 
     install_requires = [

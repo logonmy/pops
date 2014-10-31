@@ -8,7 +8,7 @@ from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
 import StringIO
 import argparse
-import asyncore_patch
+import asyncore_patch; asyncore_patch.patch_all()
 import asyncore
 import asynchat
 import gzip
@@ -24,11 +24,6 @@ try:
 except ImportError:
     if sys.platform in ['linux2', 'darwin']:
         raise ImportError
-
-from pops import HTTPRequest
-from pops import HTTPResponse
-from pops import HTTPHeadersCaseSensitive
-
 
 __version__ = "201411"
 
@@ -49,6 +44,159 @@ DEFAULT_ERROR_MESSAGE = """\
 DEFAULT_ERROR_CONTENT_TYPE = "text/html"
 
 responses = BaseHTTPRequestHandler.responses
+
+
+class HTTPHeadersCaseSensitive(object):
+    """
+    I would like to keep it as origin in case sensitive,
+    although RFC2616 said 'Field names are case-insensitive.'
+    http://tools.ietf.org/html/rfc2616#section-4.2
+    """
+
+    # http://www.mnot.net/blog/2011/07/11/what_proxies_must_do
+    HOP_BY_HOP_HEADERS = (
+        'Connection',
+        'TE',
+        'Transfer-Encoding',
+        'Keep-Alive',
+        'Proxy-Authorization',
+        'Proxy-Authentication',
+        'Trailer',
+        'Upgrade',
+    )
+
+    def __init__(self, lines, ignores=None):
+        self.headers = []
+        self.parse_headers(lines, ignores)
+
+    @staticmethod
+    def contains(iterable, element):
+        for i in iterable:
+            if i.lower() == element:
+                return True
+        return False
+
+    def _merge_field_value(self, k, v):
+        for item in self.headers:
+            if item[0].lower() == k.lower():
+                item[1] = item[1] + ', ' + v
+                break
+
+    def parse_headers(self, lines, ignores=None):
+        field_name_list = set()
+        for line in lines:
+            first_semicolon = line.index(':')
+            k, v = line[:first_semicolon], line[first_semicolon + 1:].strip()
+            k_lower = k.lower()
+
+            if ignores and HTTPHeadersCaseSensitive.contains(ignores, k_lower):
+                continue
+
+            if k_lower in field_name_list:
+                self._merge_field_value(k, v)
+            else:
+                field_name_list.add(k.lower())
+                item = [k, v]
+                self.headers.append(item)
+
+    def get_value(self, name, default=None):
+        for item in self.headers:
+            if item[0].lower() == name.lower():
+                value = item[1]
+                return value or default
+        return default
+
+    def filter_headers(self, headers):
+        field_name_list = set()
+        new_headers = []
+
+        for item in self.headers:
+            name = item[0].lower()
+            if not HTTPHeadersCaseSensitive.contains(headers, name):
+                field_name_list.add(name)
+                new_headers.append(item)
+        self.headers = new_headers
+
+    def add_header(self, name, value, override=False):
+        for item in self.headers:
+            if item[0].lower() == name.lower():
+                if override:
+                    item[1] = value
+                else:
+                    item[1] += ', ' + value
+                return
+        item = (name, value)
+        self.headers.append(item)
+
+
+class HTTPMessage(object):
+    def __init__(self, msg, ignores_headers=None):
+        self.raw = msg
+        self.first_line = None
+        self.headers = None
+        self.body = None
+        if not ignores_headers:
+            ignores_headers = []
+        self.parse_msg(ignores_headers)
+
+    def parse_first_line(self):
+        pass
+
+    def parse_msg(self, ignores_headers):
+        splits = self.raw.split('\r\n\r\n')
+        if len(splits) == 2:
+            first_line_headers, self.body = splits[0], splits[1]
+        else:
+            first_line_headers = splits[0]
+
+        lines = [i for i in first_line_headers.split('\r\n') if i]
+        self.first_line = lines[0]
+        self.headers = HTTPHeadersCaseSensitive(lines=lines[1:], ignores=ignores_headers)
+
+    def is_chunked(self):
+        cl = self.headers.get_value('Content-Length')
+        te = self.headers.get_value('Transfer-Encoding')
+        return cl is None and te and te.lower() == 'chunked'
+
+    def __str__(self):
+        lines = [self.first_line]
+        for item in self.headers.headers:
+            lines.append('%s: %s' % (item[0], item[1]))
+        body = self.body or ''
+        msg = '\r\n'.join(lines) + '\r\n\r\n' + body
+        return msg
+
+
+class HTTPRequest(HTTPMessage):
+    def __init__(self, msg):
+        super(HTTPRequest, self).__init__(msg=msg)
+
+        self.method = None
+        self.request_uri = None
+        self.version = None
+        self.parse_first_line()
+
+    def parse_first_line(self):
+        method, request_uri, version = self.first_line.split(None, 2)
+        self.method = method
+        self.request_uri = request_uri
+        self.version = version
+
+
+class HTTPResponse(HTTPMessage):
+    def __init__(self, msg):
+        super(HTTPResponse, self).__init__(msg=msg)
+
+        self.version = None
+        self.status_code = None
+        self.reason = None
+        self.parse_first_line()
+
+    def parse_first_line(self):
+        version, status_code, reason = self.first_line.split(None, 2)
+        self.version = version
+        self.status_code = int(status_code)
+        self.reason = reason
 
 
 class StringHelper(object):
@@ -197,7 +345,9 @@ class ProxySender(asynchat.async_chat):
         self._forward_resp_in_chunked_for_lt_http11 = None
 
     def handle_connect(self):
-        pass
+        if self.server.args.vvv:
+            print
+            print '>>> %s connected' % self.addr_server_formatted
 
     def collect_incoming_data(self, data):
         if not self.reading_chunk:
@@ -208,7 +358,7 @@ class ProxySender(asynchat.async_chat):
     def found_terminator(self):
         terminator = self.get_terminator()
 
-        if self.server.args.verbose:
+        if self.server.args.vvv:
             print
             print '>>> sender terminator', repr(terminator)
 
@@ -222,7 +372,9 @@ class ProxySender(asynchat.async_chat):
             if not self.reading_chunk:
                 self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
-                if self.server.args.verbose:
+                if self.server.args.v:
+                    print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
+                elif self.server.args.vv or self.server.args.vvv:
                     print_msg(msg=self.raw_msg, msg_type='response')
 
                 if terminator is 0:
@@ -236,6 +388,10 @@ class ProxySender(asynchat.async_chat):
     def handle_close(self):
         self.receiver.close()
         self.close()
+
+        if self.server.args.vvv:
+            print
+            print '>>> %s disconnect' % self.addr_server_formatted
 
 
     def _handle_header(self):
@@ -255,7 +411,9 @@ class ProxySender(asynchat.async_chat):
                 else:
                     self.set_terminator(EOL)
 
-                    if self.server.args.verbose:
+                    if self.server.args.v:
+                        print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
+                    elif self.server.args.vv or self.server.args.vvv:
                         print_msg(msg=self.raw_msg, msg_type='response')
 
                     self.receiver.push(self.raw_msg)
@@ -267,7 +425,9 @@ class ProxySender(asynchat.async_chat):
 
                     msg = str(self.msg_resp)
 
-                    if self.server.args.verbose:
+                    if self.server.args.v:
+                        print_msg(msg=msg.split('\r\n')[0], msg_type='response')
+                    elif self.server.args.vv or self.server.args.vvv:
                         print_msg(msg=msg, msg_type='response')
 
                     self.receiver.push(msg)
@@ -277,7 +437,9 @@ class ProxySender(asynchat.async_chat):
                 else:
                     msg = HTTPHelper.rewriteResp(msg_resp=self.msg_resp, ignore_headers=['Transfer-Encoding'])
 
-                    if self.server.args.verbose:
+                    if self.server.args.v:
+                        print_msg(msg=msg.split('\r\n')[0], msg_type='response')
+                    elif self.server.args.vv or self.server.args.vvv:
                         print_msg(msg=msg, msg_type='response')
 
                     self.receiver.push(msg)
@@ -288,12 +450,16 @@ class ProxySender(asynchat.async_chat):
                 self.reading_chunk = True
                 self.set_terminator('\r\n')
             else:
-                if self.server.args.verbose:
+                if self.server.args.v:
+                    print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
+                elif self.server.args.vv or self.server.args.vvv:
                     print_msg(msg=self.raw_msg, msg_type='response')
 
                 self.receiver.push(self.raw_msg)
         else:
-            if self.server.args.verbose:
+            if self.server.args.v:
+                print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
+            elif self.server.args.vv or self.server.args.vvv:
                 print_msg(msg=self.raw_msg, msg_type='response')
 
             self.receiver.push(self.raw_msg)
@@ -302,7 +468,7 @@ class ProxySender(asynchat.async_chat):
         if self.forward_resp_in_chunked_for_ge_http11:
             data = self.raw_msg + '\r\n'
 
-            if self.server.args.verbose:
+            if self.server.args.vv or self.server.args.vvv:
                 print_msg(msg=repr(data), msg_type='response(chunk)')
 
             self.receiver.push(data)
@@ -328,7 +494,10 @@ class ProxySender(asynchat.async_chat):
                     gz = gzip.GzipFile(fileobj=StringIO.StringIO(''.join(self.chunks)))
                     body = gz.read()
 
-                    print_msg(msg=body, msg_type='response')
+                    if self.server.args.v:
+                        print_msg(msg=body.split('\r\n')[0], msg_type='response')
+                    elif self.server.args.vv or self.server.args.vvv:
+                        print_msg(msg=body, msg_type='response')
                     self.receiver.push(body)
 
                     self.set_terminator(EOL)
@@ -369,21 +538,27 @@ class ProxyReceiver(asynchat.async_chat):
     def found_terminator(self):
         terminator = self.get_terminator()
 
-        if self.server.args.verbose:
+        if self.server.args.vvv:
             print
             print '>>> receiver terminator:', repr(terminator)
 
         if isinstance(terminator, basestring):
             self.raw_msg += EOL
 
-            if self.server.args.verbose:
+            if self.server.args.v:
+                print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='request')
+            elif self.server.args.vv or self.server.args.vvv:
                 print_msg(msg=self.raw_msg, msg_type='request')
 
             self.msg_req = HTTPRequest(self.raw_msg)
 
             if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
                 msg = generate_resp(code=httplib.BAD_REQUEST)
-                print_msg(msg=msg, msg_type='response')
+
+                if self.server.args.v:
+                    print_msg(msg=msg.split('\r\n')[0], msg_type='response')
+                elif self.server.args.vv or self.server.args.vvv:
+                    print_msg(msg=msg, msg_type='response')
                 self.push(msg)
                 return
 
@@ -399,19 +574,25 @@ class ProxyReceiver(asynchat.async_chat):
 
                 msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
 
-                if self.server.args.verbose:
+                if self.server.args.v:
+                    print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
+                if self.server.args.vv or self.server.args.vvv:
                     print_msg(msg=msg, msg_type='request(rewritten)')
 
                 self.sender.push(msg)
 
         elif isinstance(terminator, int) or isinstance(terminator, long):
-            if self.server.args.verbose:
+            if self.server.args.v:
+                print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='request')
+            elif self.server.args.vv or self.server.args.vvv:
                 print_msg(msg=self.raw_msg, msg_type='request')
 
             self.msg_req = HTTPRequest(self.raw_msg)
             msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
 
-            if self.server.args.verbose:
+            if self.server.args.v:
+                print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
+            if self.server.args.vv or self.server.args.vvv:
                 print_msg(msg=msg, msg_type='request(rewritten)')
 
             if terminator is 0:
@@ -424,6 +605,13 @@ class ProxyReceiver(asynchat.async_chat):
     def _setup_sender(self, addr):
         self.sender = ProxySender(self, addr, self._map)
         self.sender.id = self.id
+
+    def handle_close(self):
+        self.close()
+
+        if self.server.args.vvv:
+            print
+            print '>>> %s disconnect' % self.addr_client_formatted
 
 
 class HTTPServer(asyncore.dispatcher):
@@ -457,17 +645,18 @@ class HTTPServer(asyncore.dispatcher):
         walk around problem Thundering herd
         """
 
-        # print 'pid:%d awake' % os.getpid()
+        if self.args.vvv:
+            print 'thundering herd, pid:%d awake' % os.getpid()
         _ = self.accept()
         if not _:
             return
-        # print 'pid:%d hit' % os.getpid()
+        if self.args.vvv:
+            print 'thundering herd, pid:%d hit' % os.getpid()
 
         sock_client, addr_client = _[0], _[1]
 
-        if self.args.verbose:
-            addr_client_formatted = ':'.join(str(i) for i in addr_client)
-            msg = addr_client_formatted + ' connected'
+        if self.args.vvv:
+            msg = format_addr(addr_client) + ' connected'
             print >>sys.stdout, msg
 
         self.RequestHandlerClass(self, (sock_client, addr_client), self._map)
@@ -521,7 +710,9 @@ def main(args):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
-    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS', version=__version__)
+    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS')
+
+    parser.add_argument('--version', action='version', version=__version__)
 
     parser.add_argument('--addr',
                         default='127.0.0.1',
@@ -536,13 +727,21 @@ if __name__ == "__main__":
                         default=multiprocessing.cpu_count(),
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
 
-    parser.add_argument('--verbose',
+    parser.add_argument('-v',
                         action='store_true',
                         help='dump headers of request and response into stdout')
 
+    parser.add_argument('-vv',
+                        action='store_true',
+                        help='dump body of request and response into stdout')
+
+    parser.add_argument('-vvv',
+                        action='store_true',
+                        help='dump anything into stdout')
+
     parser.add_argument('--http1.0',
                         action='store_true',
-                        help='dump entry body of request and response into stdout, it requires --verbose')
+                        help='force proxy server using HTTP/1.0')
 
     parser.add_argument('--error_log',
                         help='default /dev/null')
