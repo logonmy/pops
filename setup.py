@@ -22,5 +22,6 @@ setup(
     install_requires = [
         "argparse",
         "python-daemon",
+        "asyncore_patch",
         ],
 )
