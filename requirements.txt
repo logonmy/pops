@@ -1,6 +1,11 @@
 # https://pypi.python.org/pypi/argparse
 argparse
+
 # https://pypi.python.org/pypi/lockfile
 lockfile
+
 # https://pypi.python.org/pypi/python-daemon
 python-daemon
+
+# https://github.com/shuge/asyncore_patch
+asyncore_patch
