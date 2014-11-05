@@ -9,6 +9,8 @@ from BaseHTTPServer import _quote_html
 import StringIO
 import argparse
 import asyncore_patch; asyncore_patch.patch_all()
+import errno
+
 import asyncore
 import asynchat
 import gzip
@@ -215,7 +217,13 @@ class StringHelper(object):
                    '%s...< %d bytes >...%s' % (suffix[:CONTEXT_LEN/2], len(suffix) - CONTEXT_LEN, suffix[-CONTEXT_LEN/2:])
 
 
-def generate_resp(code, reason=None, body=None, protocol_version='HTTP/1.1'):
+def generate_resp(code,
+                  reason=None,
+                  headers=None,
+                  body=None,
+                  using_body_template=False,
+                  close_it=False,
+                  protocol_version='HTTP/1.1'):
     try:
         short, long = responses[code]
     except KeyError:
@@ -224,16 +232,37 @@ def generate_resp(code, reason=None, body=None, protocol_version='HTTP/1.1'):
         reason = short
     explain = long
 
-    body = (DEFAULT_ERROR_MESSAGE %
-               {'code': code, 'message': _quote_html(reason), 'explain': explain})
+    status_line = "%s %d %s" % (protocol_version, code, reason)
 
-    lines = '\r\n'.join([
-        "%s %d %s" % (protocol_version, code, reason),
-        "Content-Type: %s" % DEFAULT_ERROR_CONTENT_TYPE,
-        'Content-Length: %d' % len(body),
-        'Connection: close'
-    ])
-    msg = lines + EOL + body
+    if not body and using_body_template and code != httplib.OK:
+        body = (DEFAULT_ERROR_MESSAGE %
+               {'code': code, 'message': _quote_html(reason), 'explain': explain})
+    else:
+        body = ''
+
+    if body:
+        other_headers = [
+            "Content-Type: %s" % DEFAULT_ERROR_CONTENT_TYPE,
+            'Content-Length: %d' % len(body),
+        ]
+    else:
+        other_headers = [
+            "Content-Type: %s" % DEFAULT_ERROR_CONTENT_TYPE,
+        ]
+
+    if close_it:
+        other_headers.append('Connection: close')
+
+    lines = [status_line]
+    if headers:
+        lines.extend(headers)
+    lines.extend(other_headers)
+
+    if body:
+        msg = '\r\n'.join(lines) + EOL + body
+    else:
+        msg = '\r\n'.join(lines) + EOL
+
     return msg
 
 
@@ -344,16 +373,30 @@ class ProxySender(asynchat.async_chat):
         self.forward_resp_in_chunked_for_ge_http11 = None
         self._forward_resp_in_chunked_for_lt_http11 = None
 
+        self.is_tunnel = False
+
+    def handle_connect_event(self):
+        try:
+            asynchat.async_chat.handle_connect_event(self)
+        except socket.timeout:
+            msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                          protocol_version=self.server.protocol_version)
+            self.receiver.push(msg)
+            self.close_when_done()
+
     def handle_connect(self):
         if self.server.args.vvv:
             print
             print '>>> %s connected' % self.addr_server_formatted
 
     def collect_incoming_data(self, data):
-        if not self.reading_chunk:
+        if not self.is_tunnel:
             self.raw_msg += data
         else:
-            self.raw_msg += data
+            if self.server.args.vv or self.server.args.vvv:
+                print_msg(msg=repr(data), msg_type='response(forward)')
+            self.receiver.push(data)
+
 
     def found_terminator(self):
         terminator = self.get_terminator()
@@ -531,9 +574,15 @@ class ProxyReceiver(asynchat.async_chat):
 
         self.set_terminator(EOL)
         self.sender = None
+        self.is_tunnel = False
 
     def collect_incoming_data(self, data):
-        self.raw_msg += data
+        if not self.is_tunnel:
+            self.raw_msg += data
+        else:
+            if self.server.args.vv or self.server.args.vvv:
+                print_msg(msg=repr(data), msg_type='request(forward)')
+            self.sender.push(data)
 
     def found_terminator(self):
         terminator = self.get_terminator()
@@ -552,7 +601,7 @@ class ProxyReceiver(asynchat.async_chat):
 
             self.msg_req = HTTPRequest(self.raw_msg)
 
-            if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
+            if not HTTPHelper.is_proxy_request(self.msg_req.request_uri) and self.msg_req.method.upper() != "CONNECT":
                 msg = generate_resp(code=httplib.BAD_REQUEST)
 
                 if self.server.args.v:
@@ -563,23 +612,68 @@ class ProxyReceiver(asynchat.async_chat):
                 return
 
             parses = urlparse.urlparse(self.msg_req.request_uri)
-            addr = HTTPHelper.parse_addr_from_urlparse(parses)
-            self._setup_sender(addr)
-
-            cl = self.msg_req.headers.get_value('Content-Length')
-            if cl is not None:
-                self.set_terminator(int(cl))
+            if self.msg_req.method.upper() != "CONNECT":
+                addr = HTTPHelper.parse_addr_from_urlparse(parses)
             else:
-                self.set_terminator(EOL)
+                # self.msg_req.request_uri = 'google.com:443'
+                # urlparse.urlparse(self.msg_req.request_uri)
+                # ParseResult(scheme='', netloc='', path='google.com:443', params='', query='', fragment='')
+                splits = parses.path.split(':')
+                addr = (splits[0], int(splits[1]))
 
-                msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+            try:
+                self._setup_sender(addr)
+            except socket.timeout:
+                msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                              reason='Forwarding failure',
+                              protocol_version=self.server.protocol_version)
+                self.push(msg)
+                return
+            except socket.error, ex:
+                err_no = ex.args[0]
+                if err_no == errno.ECONNREFUSED:
+                    msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                              reason='Forwarding failure',
+                              protocol_version=self.server.protocol_version)
+                    self.push(msg)
+                    return
+                else:
+                    raise ex
+
+            if self.msg_req.method.upper() != "CONNECT":
+                cl = self.msg_req.headers.get_value('Content-Length')
+                if cl is not None:
+                    self.set_terminator(int(cl))
+                else:
+                    self.set_terminator(EOL)
+
+                    msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+
+                    if self.server.args.v:
+                        print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
+                    elif self.server.args.vv or self.server.args.vvv:
+                        print_msg(msg=msg, msg_type='request(rewritten)')
+
+                    self.sender.push(msg)
+            else:
+                self.set_terminator(None)
+
+                msg = generate_resp(code=httplib.OK,
+                                    reason='Connection established',
+                              headers=['Proxy-Agent: %s' % self.server.server_version],
+                              protocol_version=self.server.protocol_version)
 
                 if self.server.args.v:
-                    print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
-                if self.server.args.vv or self.server.args.vvv:
-                    print_msg(msg=msg, msg_type='request(rewritten)')
+                    print_msg(msg=msg.split('\r\n')[0], msg_type='response')
+                elif self.server.args.vv or self.server.args.vvv:
+                    print_msg(msg=msg, msg_type='response')
 
-                self.sender.push(msg)
+                self.push(msg)
+                self.raw_msg = ''
+
+                self.is_tunnel = True
+
+                self.sender.is_tunnel = True
 
         elif isinstance(terminator, int) or isinstance(terminator, long):
             if self.server.args.v:
@@ -592,7 +686,7 @@ class ProxyReceiver(asynchat.async_chat):
 
             if self.server.args.v:
                 print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
-            if self.server.args.vv or self.server.args.vvv:
+            elif self.server.args.vv or self.server.args.vvv:
                 print_msg(msg=msg, msg_type='request(rewritten)')
 
             if terminator is 0:
