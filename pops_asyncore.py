@@ -1,8 +1,9 @@
 """
-Rewritten pops in asyncore with epoll patch.
+Rewritten pops in asyncore and asyncore_patch.
 
 See also:
  - http://bugs.python.org/issue6692
+ - https://github.com/shuge/asyncore_patch
 """
 from BaseHTTPServer import BaseHTTPRequestHandler
 from BaseHTTPServer import _quote_html
