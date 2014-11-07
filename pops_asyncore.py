@@ -4,6 +4,9 @@ Rewritten pops in asyncore and asyncore_patch.
 See also:
  - http://bugs.python.org/issue6692
  - https://github.com/shuge/asyncore_patch
+
+TODO:
+ - custom connect/read/write timeout via custom asyncore.loop/socket_map/poll_func
 """
 import BaseHTTPServer
 import cStringIO
@@ -412,6 +415,8 @@ class ProxySender(async_chat_wrapper):
 
         self.set_terminator(EOL)
 
+        self.socket_closed = False
+
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.connect(self.addr_origin_server)
 
@@ -446,23 +451,26 @@ class ProxySender(async_chat_wrapper):
     def handle_connect_event(self):
         try:
             async_chat_wrapper.handle_connect_event(self)
-        except socket.timeout:
-            msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
-                          protocol_version=self.server.protocol_version)
-            self.receiver.push(msg)
-            self.close_when_done()
-
-            if self.server.args.log_conn_status:
-                print '%s connect to %s timeout' % (self.date_time_string(), self.address_string())
         except socket.error, ex:
-            if ex.errno == errno.ETIMEDOUT:
+            if ex.errno == errno.ECONNREFUSED:
+                # privoxy 3.0.21 responses 503 in this situation, should we response BAD_GATEWAY instead?
+                msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                                    reason='Connect failed',
+                                    close_it=True,
+                              protocol_version=self.server.protocol_version)
+                self.receiver.push(msg)
+                self.close_when_done()
+
+                if self.server.args.log_conn_status:
+                    print '%s connect to %s refused' % (self.date_time_string(), self.address_string())
+            elif ex.errno == errno.ETIMEDOUT:
                 msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
                               protocol_version=self.server.protocol_version)
                 self.receiver.push(msg)
                 self.close_when_done()
 
-            if self.server.args.log_conn_status:
-                print '%s connect to %s timeout' % (self.date_time_string(), self.address_string())
+                if self.server.args.log_conn_status:
+                    print '%s connect to %s timeout' % (self.date_time_string(), self.address_string())
             else:
                 raise ex
 
@@ -471,12 +479,20 @@ class ProxySender(async_chat_wrapper):
             print '%s connect to %s, fd:%d' % (self.date_time_string(), self.address_string(), self.socket.fileno())
 
     def handle_close(self):
+        if self.socket_closed:
+            return
+        self.socket_closed = True
+
         fd = self.socket.fileno()
         async_chat_wrapper.handle_close(self)
 
         if self.server.args.log_conn_status:
-            print '%s %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
+            print '%s origin-server %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
 
+        # Sometime upstream server close actively first,
+        # We have to actively disconnect client connection, too.
+        if not self.receiver.socket_closed:
+           self.receiver.handle_close()
 
     def handle_header(self):
         terminator = self.get_terminator()
@@ -515,7 +531,7 @@ class ProxySender(async_chat_wrapper):
                 try:
                     cl = int(cl)
                 except ValueError:
-                    self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
+                    self.raw_msg = generate_resp(code=httplib.BAD_REQUEST)
                     self.msg_resp = HTTPResponse(msg=self.raw_msg)
                     self.handle_body()
                     return
@@ -616,10 +632,13 @@ class ProxyReceiver(async_chat_wrapper):
 
         self.raw_msg = ''
         self.msg_req = None
+        self.raw_msg_is_resp = False
 
         self.set_terminator(EOL)
         self.sender = None
         self.is_tunnel = False
+
+        self.socket_closed = False
 
     @property
     def address(self):
@@ -646,6 +665,10 @@ class ProxyReceiver(async_chat_wrapper):
         self.sender = ProxySender(proxy_receiver=self, addr_origin_server=addr, socket_map=self._map)
 
     def handle_close(self):
+        if self.socket_closed:
+            return
+        self.socket_closed = True
+
         try:
             fd = self.socket.fileno()
         except socket.error, ex:
@@ -657,18 +680,19 @@ class ProxyReceiver(async_chat_wrapper):
         async_chat_wrapper.handle_close(self)
 
         if self.server.args.log_conn_status:
-            print '%s %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
+            print '%s user-agent %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
 
-        try:
-            self.sender.handle_close()
-        except socket.error, ex:
-            if ex.errno == errno.EBADF:
-                fd = -1
+        if not self.sender.socket_closed:
+            try:
+                self.sender.handle_close()
+            except socket.error, ex:
+                if ex.errno == errno.EBADF:
+                    fd = -1
 
-                if self.server.args.log_conn_status:
-                    print '%s %s disconnect, fd:%d' % (self.date_time_string(), self.sender.address_string(), fd)
-            else:
-                raise ex
+                    if self.server.args.log_conn_status:
+                        print '%s origin-server %s disconnect, fd:%d' % (self.date_time_string(), self.sender.address_string(), fd)
+                else:
+                    raise ex
 
     def handle_header(self):
         self.msg_req = HTTPRequest(self.raw_msg)
@@ -683,39 +707,41 @@ class ProxyReceiver(async_chat_wrapper):
 
         try:
             self.setup_sender(addr)
-        except socket.timeout:
-            self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
-                          reason='Forwarding failure',
-                          protocol_version=self.server.protocol_version)
-            self.handle_body()
-            return
         except socket.error, ex:
-            err_no = ex.args[0]
-            if err_no == errno.ECONNREFUSED:
+            if ex.errno == errno.ECONNREFUSED:
                 self.raw_msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
                           reason='Forwarding failure',
                           protocol_version=self.server.protocol_version)
+                self.raw_msg_is_resp = True
+                self.handle_body()
+                return
+            elif ex.errno == errno.ETIMEDOUT:
+                self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                              reason='Forwarding failure',
+                              protocol_version=self.server.protocol_version)
+                self.raw_msg_is_resp = True
                 self.handle_body()
                 return
             else:
                 raise ex
 
-        msg = generate_resp(code=httplib.OK,
-                            reason='Connection established',
-                      headers=['Proxy-Agent: %s' % self.server.server_version],
-                      protocol_version=self.server.protocol_version)
-        self.push(msg)
+        if self.sender.connected:
+            self.raw_msg = generate_resp(code=httplib.OK,
+                                reason='Connection established',
+                          headers=['Proxy-Agent: %s' % self.server.server_version],
+                          protocol_version=self.server.protocol_version)
+            self.raw_msg_is_resp = True
+            self.handle_body()
 
-        self.raw_msg = ''
+            self.is_tunnel = True
+            self.sender.is_tunnel = True
 
-        self.is_tunnel = True
-        self.sender.is_tunnel = True
-
-        self.set_terminator(None)
+            self.set_terminator(None)
 
     def handle_header_method_others(self):
         if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
             self.raw_msg = generate_resp(code=httplib.BAD_REQUEST)
+            self.raw_msg_is_resp = True
             self.handle_body()
             return
 
@@ -723,18 +749,21 @@ class ProxyReceiver(async_chat_wrapper):
 
         try:
             self.setup_sender(addr)
-        except socket.timeout:
-            self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
-                          reason='Forwarding failure',
-                          protocol_version=self.server.protocol_version)
-            self.handle_body()
-            return
         except socket.error, ex:
             err_no = ex.args[0]
             if err_no == errno.ECONNREFUSED:
                 self.raw_msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
                           reason='Forwarding failure',
                           protocol_version=self.server.protocol_version)
+                self.raw_msg_is_resp = True
+                self.handle_body()
+                return
+
+            elif err_no == errno.ETIMEDOUT:
+                self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                              reason='Forwarding failure',
+                              protocol_version=self.server.protocol_version)
+                self.raw_msg_is_resp = True
                 self.handle_body()
                 return
             else:
@@ -760,9 +789,27 @@ class ProxyReceiver(async_chat_wrapper):
 
     def handle_body(self):
         self.sender.push(self.raw_msg)
+
+        if self.server.args.log_access and self.raw_msg_is_resp:
+            if self.raw_msg:
+                bytes = len(self.raw_msg.split(EOL)[-1])
+            else:
+                bytes = 0
+            msg_resp = HTTPResponse(msg=self.raw_msg)
+
+            self.server.log_request(
+                addr_client=self.addr_client[0],
+                request_line=self.msg_req.request_line,
+                code=msg_resp.status_code,
+                size=bytes)
+
+            self.raw_msg_is_resp = False
+
         self.raw_msg = ''
 
-        # reset self.msg_req to None in sender.handle_body
+        # We reset self.msg_req to None in sender.handle_body,
+        # because of access logging in sender.log_request requires self.msg_req as context.
+        #
         # self.msg_req = None
 
         self.set_terminator(EOL)
