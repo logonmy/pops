@@ -408,6 +408,7 @@ class ProxySender(async_chat_wrapper):
         self.user_agent_not_supports_transfer_encoding_chunked = None
 
         self.is_tunnel = False
+        self.forward_until_conn_close = False
 
         self.set_terminator(EOL)
 
@@ -420,6 +421,8 @@ class ProxySender(async_chat_wrapper):
 
     def collect_incoming_data(self, data):
         if self.is_tunnel:
+            self.receiver.push(data)
+        elif self.forward_until_conn_close:
             self.receiver.push(data)
         else:
             self.raw_msg += data
@@ -465,13 +468,14 @@ class ProxySender(async_chat_wrapper):
 
     def handle_connect(self):
         if self.server.args.log_conn_status:
-            print '%s connect to %s' % (self.date_time_string(), self.address_string())
+            print '%s connect to %s, fd:%d' % (self.date_time_string(), self.address_string(), self.socket.fileno())
 
     def handle_close(self):
+        fd = self.socket.fileno()
         async_chat_wrapper.handle_close(self)
 
         if self.server.args.log_conn_status:
-            print '%s %s disconnect' % (self.date_time_string(), self.address_string())
+            print '%s %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
 
 
     def handle_header(self):
@@ -480,25 +484,16 @@ class ProxySender(async_chat_wrapper):
 
         self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
-        if self.receiver.msg_req.method != 'HEAD' and \
+        if self.receiver.msg_req.method.upper() != 'HEAD' and \
                         self.msg_resp.status_code >= httplib.OK and \
                         self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
+
+            conn = self.msg_resp.headers.get_value('Connection')
             cl = self.msg_resp.headers.get_value('Content-Length')
-            if cl is not None:
-                self.reading_chunk = False
-                self.user_agent_not_supports_transfer_encoding_chunked = False
-                self.user_agent_supports_transfer_encoding_chunked = False
 
-                cl = int(cl)
-
-                self.receiver.push(self.raw_msg)
-                self.raw_msg = ''
-
-                if cl > 0:
-                    self.set_terminator(cl)
-                    return
-
-            elif self.msg_resp.is_chunked():
+            # For confirm to http://tools.ietf.org/html/rfc7230#section-3.3.3,
+            # we detect body encoding if in chunked before content-length field.
+            if self.msg_resp.is_chunked():
                 if self.receiver.msg_req.version >= "HTTP/1.1":
                     self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
                     self.receiver.push(str(self.msg_resp))
@@ -515,30 +510,56 @@ class ProxySender(async_chat_wrapper):
                 self.reading_chunk = True
                 self.set_terminator(CHUNK_EOL)
                 return
-            else:
+
+            elif cl is not None:
+                try:
+                    cl = int(cl)
+                except ValueError:
+                    self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
+                    self.msg_resp = HTTPResponse(msg=self.raw_msg)
+                    self.handle_body()
+                    return
+
                 self.receiver.push(self.raw_msg)
                 self.raw_msg = ''
+
+                if cl > 0:
+                    self.set_terminator(cl)
+                    return
+
+                self.handle_body()
+
+            elif conn.lower() == 'close':
+                self.forward_until_conn_close = True
+                self.set_terminator(None)
+            else:
+                self.handle_body()
         else:
-            self.reading_chunk = False
-
-            self.receiver.push(self.raw_msg)
-            self.raw_msg = ''
-
-        self.set_terminator(EOL)
+            self.handle_body()
 
     def handle_body(self):
         self.receiver.push(self.raw_msg)
 
         if self.server.args.log_access:
+            if self.raw_msg:
+                bytes = len(self.raw_msg.split(EOL)[-1])
+            else:
+                bytes = 0
             self.server.log_request(
                 addr_client=self.receiver.addr_client[0],
                 request_line=self.receiver.msg_req.request_line,
                 code=self.msg_resp.status_code,
-                size=len(self.raw_msg))
+                size=bytes)
 
         self.raw_msg = ''
+        field_expect = self.receiver.msg_req.headers.get_value('Expect')
+        if field_expect is None and self.msg_resp.status_code != httplib.CONTINUE:
+            self.receiver.msg_req = None
         self.msg_resp = None
-        self.receiver.msg_req = None
+
+        self.reading_chunk = False
+        self.user_agent_not_supports_transfer_encoding_chunked = False
+        self.user_agent_supports_transfer_encoding_chunked = False
 
         self.set_terminator(EOL)
 
@@ -625,12 +646,29 @@ class ProxyReceiver(async_chat_wrapper):
         self.sender = ProxySender(proxy_receiver=self, addr_origin_server=addr, socket_map=self._map)
 
     def handle_close(self):
+        try:
+            fd = self.socket.fileno()
+        except socket.error, ex:
+            if ex.errno == errno.EBADF:
+                fd = -1
+            else:
+                raise ex
+
         async_chat_wrapper.handle_close(self)
 
         if self.server.args.log_conn_status:
-            print '%s %s disconnect' % (self.date_time_string(), self.address_string())
+            print '%s %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
 
-        self.sender.handle_close()
+        try:
+            self.sender.handle_close()
+        except socket.error, ex:
+            if ex.errno == errno.EBADF:
+                fd = -1
+
+                if self.server.args.log_conn_status:
+                    print '%s %s disconnect, fd:%d' % (self.date_time_string(), self.sender.address_string(), fd)
+            else:
+                raise ex
 
     def handle_header(self):
         self.msg_req = HTTPRequest(self.raw_msg)
@@ -646,18 +684,18 @@ class ProxyReceiver(async_chat_wrapper):
         try:
             self.setup_sender(addr)
         except socket.timeout:
-            msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+            self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
                           reason='Forwarding failure',
                           protocol_version=self.server.protocol_version)
-            self.push(msg)
+            self.handle_body()
             return
         except socket.error, ex:
             err_no = ex.args[0]
             if err_no == errno.ECONNREFUSED:
-                msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                self.raw_msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
                           reason='Forwarding failure',
                           protocol_version=self.server.protocol_version)
-                self.push(msg)
+                self.handle_body()
                 return
             else:
                 raise ex
@@ -677,8 +715,8 @@ class ProxyReceiver(async_chat_wrapper):
 
     def handle_header_method_others(self):
         if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
-            msg = generate_resp(code=httplib.BAD_REQUEST)
-            self.push(msg)
+            self.raw_msg = generate_resp(code=httplib.BAD_REQUEST)
+            self.handle_body()
             return
 
         addr = HTTPHelper.parse_addr_from_request_uri(self.msg_req.request_uri)
@@ -686,47 +724,46 @@ class ProxyReceiver(async_chat_wrapper):
         try:
             self.setup_sender(addr)
         except socket.timeout:
-            msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+            self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
                           reason='Forwarding failure',
                           protocol_version=self.server.protocol_version)
-            self.push(msg)
+            self.handle_body()
             return
         except socket.error, ex:
             err_no = ex.args[0]
             if err_no == errno.ECONNREFUSED:
-                msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                self.raw_msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
                           reason='Forwarding failure',
                           protocol_version=self.server.protocol_version)
-                self.push(msg)
+                self.handle_body()
                 return
             else:
                 raise ex
 
+        field_cl = self.msg_req.headers.get_value('Content-Length')
+        if field_cl is not None:
+            cl = int(field_cl)
 
-        cl = self.msg_req.headers.get_value('Content-Length')
-        if cl is not None:
-            cl = int(cl)
-            
             msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
             self.sender.push(msg)
             self.raw_msg = ''
-        
-            if cl > 0:    
-                # continue to receive request body                
+
+            if cl > 0:
+                # continue to receive request body
                 self.set_terminator(cl)
             else:
                 # continue to receive next request
                 self.set_terminator(EOL)
         else:
-            msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
-            self.sender.push(msg)
-
-            # continue to receive next request
-            self.set_terminator(EOL)
+            self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+            self.handle_body()
 
     def handle_body(self):
         self.sender.push(self.raw_msg)
         self.raw_msg = ''
+
+        # reset self.msg_req to None in sender.handle_body
+        # self.msg_req = None
 
         self.set_terminator(EOL)
 
@@ -838,7 +875,7 @@ class HTTPServer(asyncore.dispatcher):
         handler = self.RequestHandlerClass(self, (sock_client, addr_client), self._map)
 
         if self.args.log_conn_status:
-            print '%s %s connected' % (self.date_time_string(), handler.address_string())
+            print '%s %s connected, fd:%d' % (self.date_time_string(), handler.address_string(), sock_client.fileno())
 
     def server_close(self):
         """ asyncore.dispatcher.handle_close already does close job. """
