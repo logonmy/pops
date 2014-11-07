@@ -31,6 +31,23 @@ class TestMethodGET(unittest.TestCase):
         self.assertEqual(status_code, httplib.OK)
         self.assertTrue(len(entry_body))
 
+    def test_method_post(self):
+        url = 'http://httpbin.org/post'
+        r = requests.post(url=url, data={'foo': 'bar'}, proxies=config.proxies, timeout=config.timeout)
+        status_code = r.status_code
+        entry_body = r.json()
+
+        self.assertEqual(status_code, httplib.OK)
+        self.assertTrue(entry_body['form']['foo'] == 'bar')
+
+    def test_method_put(self):
+        url = 'http://httpbin.org/put'
+        r = requests.put(url=url, data={'foo': 'bar'}, proxies=config.proxies, timeout=config.timeout)
+        status_code = r.status_code
+        entry_body = r.json()
+
+        self.assertEqual(status_code, httplib.OK)
+        self.assertTrue(entry_body['form']['foo'] == 'bar')
 
 class TestMethodCONNECT(unittest.TestCase):
 
