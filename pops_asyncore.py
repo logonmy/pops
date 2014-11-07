@@ -5,11 +5,11 @@ See also:
  - http://bugs.python.org/issue6692
  - https://github.com/shuge/asyncore_patch
 """
-from BaseHTTPServer import BaseHTTPRequestHandler
-from BaseHTTPServer import _quote_html
-import StringIO
+import BaseHTTPServer
+import cStringIO
 import argparse
 import asyncore_patch; asyncore_patch.patch_all()
+import time
 import errno
 
 import asyncore
@@ -31,22 +31,17 @@ except ImportError:
 __version__ = "201411"
 
 
-format_addr = lambda addr : ':'.join(str(i) for i in addr)
-
 DEFAULT_ERROR_MESSAGE = """\
 <head>
-<title>Error response</title>
+<title>Response</title>
 </head>
 <body>
-<h1>Error response</h1>
-<p>Error code %(code)d.
+<h1>Response</h1>
+<p>Status code %(code)d.
 <p>Message: %(message)s.
-<p>Error code explanation: %(code)s = %(explain)s.
+<p>Code explanation: %(code)s = %(explain)s.
 </body>
 """
-DEFAULT_ERROR_CONTENT_TYPE = "text/html"
-
-responses = BaseHTTPRequestHandler.responses
 
 
 class HTTPHeadersCaseSensitive(object):
@@ -135,25 +130,25 @@ class HTTPHeadersCaseSensitive(object):
 class HTTPMessage(object):
     def __init__(self, msg, ignores_headers=None):
         self.raw = msg
-        self.first_line = None
+        self.start_line = None
         self.headers = None
         self.body = None
         if not ignores_headers:
             ignores_headers = []
         self.parse_msg(ignores_headers)
 
-    def parse_first_line(self):
+    def parse_start_line(self):
         pass
 
     def parse_msg(self, ignores_headers):
         splits = self.raw.split('\r\n\r\n')
         if len(splits) == 2:
-            first_line_headers, self.body = splits[0], splits[1]
+            start_line_headers, self.body = splits[0], splits[1]
         else:
-            first_line_headers = splits[0]
+            start_line_headers = splits[0]
 
-        lines = [i for i in first_line_headers.split('\r\n') if i]
-        self.first_line = lines[0]
+        lines = [i for i in start_line_headers.split('\r\n') if i]
+        self.start_line = lines[0]
         self.headers = HTTPHeadersCaseSensitive(lines=lines[1:], ignores=ignores_headers)
 
     def is_chunked(self):
@@ -162,7 +157,7 @@ class HTTPMessage(object):
         return cl is None and te and te.lower() == 'chunked'
 
     def __str__(self):
-        lines = [self.first_line]
+        lines = [self.start_line]
         for item in self.headers.headers:
             lines.append('%s: %s' % (item[0], item[1]))
         body = self.body or ''
@@ -171,35 +166,43 @@ class HTTPMessage(object):
 
 
 class HTTPRequest(HTTPMessage):
-    def __init__(self, msg):
-        super(HTTPRequest, self).__init__(msg=msg)
+    def __init__(self, msg, ignores_headers=None):
+        super(HTTPRequest, self).__init__(msg=msg, ignores_headers=ignores_headers)
 
         self.method = None
         self.request_uri = None
         self.version = None
-        self.parse_first_line()
+        self.parse_start_line()
 
-    def parse_first_line(self):
-        method, request_uri, version = self.first_line.split(None, 2)
+    def parse_start_line(self):
+        method, request_uri, version = self.start_line.split(None, 2)
         self.method = method
         self.request_uri = request_uri
         self.version = version
 
+    @property
+    def request_line(self):
+        return self.start_line
+
 
 class HTTPResponse(HTTPMessage):
-    def __init__(self, msg):
-        super(HTTPResponse, self).__init__(msg=msg)
+    def __init__(self, msg, ignores_headers=None):
+        super(HTTPResponse, self).__init__(msg=msg, ignores_headers=ignores_headers)
 
         self.version = None
         self.status_code = None
         self.reason = None
-        self.parse_first_line()
+        self.parse_start_line()
 
-    def parse_first_line(self):
-        version, status_code, reason = self.first_line.split(None, 2)
+    def parse_start_line(self):
+        version, status_code, reason = self.start_line.split(None, 2)
         self.version = version
         self.status_code = int(status_code)
         self.reason = reason
+
+    @property
+    def status_line(self):
+        return self.start_line
 
 
 class StringHelper(object):
@@ -226,7 +229,7 @@ def generate_resp(code,
                   close_it=False,
                   protocol_version='HTTP/1.1'):
     try:
-        short, long = responses[code]
+        short, long = BaseHTTPServer.BaseHTTPRequestHandler.responses[code]
     except KeyError:
         short, long = '???', '???'
     if reason is None:
@@ -237,19 +240,16 @@ def generate_resp(code,
 
     if not body and using_body_template and code != httplib.OK:
         body = (DEFAULT_ERROR_MESSAGE %
-               {'code': code, 'message': _quote_html(reason), 'explain': explain})
+               {'code': code, 'message': BaseHTTPServer._quote_html(reason), 'explain': explain})
     else:
         body = ''
 
     if body:
         other_headers = [
-            "Content-Type: %s" % DEFAULT_ERROR_CONTENT_TYPE,
             'Content-Length: %d' % len(body),
         ]
     else:
-        other_headers = [
-            "Content-Type: %s" % DEFAULT_ERROR_CONTENT_TYPE,
-        ]
+        other_headers = []
 
     if close_it:
         other_headers.append('Connection: close')
@@ -260,6 +260,8 @@ def generate_resp(code,
     lines.extend(other_headers)
 
     if body:
+        line = "Content-Type: %s" % BaseHTTPServer.DEFAULT_ERROR_CONTENT_TYPE,
+        lines.append(line)
         msg = '\r\n'.join(lines) + EOL + body
     else:
         msg = '\r\n'.join(lines) + EOL
@@ -284,23 +286,39 @@ class HTTPHelper(object):
         """
         parses = urlparse.urlparse(s)
         return parses.scheme and parses.netloc
-        
-    @staticmethod    
+
+    @staticmethod
     def parse_request_uri_from_urlparse(parses):
         request_uri = parses.path or '/'
         if parses.query:
             request_uri += '?' + parses.query
         if parses.fragment:
-            request_uri += '#' + parses.fragment                
+            request_uri += '#' + parses.fragment
         return request_uri
-    
+
     @staticmethod
-    def parse_addr_from_urlparse(parses):
-        splits = parses.netloc.split(':')
-        if len(splits) == 2:
-            host, port = splits[0], int(splits[1])
+    def parse_addr_from_request_uri(uri):
+        """
+        >>> uri = "http://tools.ietf.org/html/rfc868.html"
+        >>> HTTPHelper.parse_addr_from_request_uri(uri) == 'tools.ietf.org:80'
+        True
+        >>> uri = 'google.com:443'
+        >>> HTTPHelper.parse_addr_from_request_uri(uri) == 'google.com:443'
+        True
+        """
+        parses = urlparse.urlparse(uri)
+        if parses.netloc:
+            splits = parses.netloc.split(':')
+            if len(splits) == 2:
+                host, port = splits[0], int(splits[1])
+            else:
+                host, port = splits[0], 80
         else:
-            host, port = splits[0], 80
+            splits = parses.path.split(':')
+            if len(splits) == 2:
+                host, port = splits[0], int(splits[1])
+            else:
+                host, port = splits[0], 443
         return (host, port)
 
     @staticmethod
@@ -314,8 +332,9 @@ class HTTPHelper(object):
 
         parses = urlparse.urlparse(msg_req.request_uri)
         request_uri = HTTPHelper.parse_request_uri_from_urlparse(parses)
-        first_line = msg_req.method + ' ' + request_uri + ' ' + msg_req.version
-        lines = [first_line]
+
+        start_line = msg_req.method + ' ' + request_uri + ' ' + msg_req.version
+        lines = [start_line]
         for item in msg_req.headers.headers:
             k_lower = item[0]
             if HTTPHeadersCaseSensitive.contains(HEADERS_DROP, k_lower):
@@ -326,119 +345,136 @@ class HTTPHelper(object):
         msg = '\r\n'.join(lines) + EOL + body
         return msg
 
-    @staticmethod
-    def rewriteResp(msg_resp, ignore_headers=None):
-        """
-        filter headers for forward request
-        """
-        if not ignore_headers:
-            ignore_headers = []
-
-        lines = [msg_resp.first_line]
-        for item in msg_resp.headers.headers:
-            k_lower = item[0]
-            if HTTPHeadersCaseSensitive.contains(ignore_headers, k_lower):
-                continue
-            line = '%s: %s' % (item[0], item[1])
-            lines.append(line)
-        header = '\r\n'.join(lines) + EOL
-        return header
-
 
 EOL = '\r\n\r\n'
+CHUNK_EOL = '\r\n'
 
 def print_msg(msg, msg_type):
     print '>>> %s' % msg_type
     print msg
 
 
-class ProxySender(asynchat.async_chat):
+class async_chat_wrapper(asynchat.async_chat):
 
-    def __init__(self, proxy_receiver, addr_server, map):
-        asynchat.async_chat.__init__(self, map=map)
+    weekdayname = BaseHTTPServer.BaseHTTPRequestHandler.weekdayname
+    monthname = BaseHTTPServer.BaseHTTPRequestHandler.monthname
 
-        self.receiver = proxy_receiver
+    def date_time_string(self, timestamp=None):
+        """ Return the current date and time formatted for a message header.
+        String format in 'Thu, 06 Nov 2014 07:43:24 GMT'.
+        This copy from BaseHTTPServer.BaseHTTPRequestHandler.
+        """
+        if timestamp is None:
+            timestamp = time.time()
+        year, month, day, hh, mm, ss, wd, y, z = time.gmtime(timestamp)
+        s = "%s, %02d %3s %4d %02d:%02d:%02d GMT" % (
+                self.weekdayname[wd],
+                day, self.monthname[month], year,
+                hh, mm, ss)
+        return s
+
+    def address_string(self):
+        return ':'.join(str(i) for i in self.address)
+
+    def handle_header(self):
+        raise NotImplemented
+
+    def handle_body(self):
+        raise NotImplemented
+
+    def handle_chunk(self):
+        raise NotImplemented
+
+    def handle_tunnel(self):
+        raise NotImplemented
+
+
+class ProxySender(async_chat_wrapper):
+
+    def __init__(self, proxy_receiver, addr_origin_server, socket_map):
+        async_chat_wrapper.__init__(self, map=socket_map)
+
         self.server = proxy_receiver.server
+        self.receiver = proxy_receiver
 
-        self.addr_server = addr_server
-        self.addr_server_formatted = ':'.join(str(i) for i in addr_server)
-
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.set_terminator(EOL)
-        self.connect(addr_server)
+        self.addr_origin_server = addr_origin_server
 
         self.raw_msg = ''
         self.msg_resp = None
+
         self.reading_chunk = False
         self.chunks = []
-        self.forward_resp_in_chunked_for_ge_http11 = None
-        self._forward_resp_in_chunked_for_lt_http11 = None
+        self.user_agent_supports_transfer_encoding_chunked = None
+        self.user_agent_not_supports_transfer_encoding_chunked = None
 
         self.is_tunnel = False
 
+        self.set_terminator(EOL)
+
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connect(self.addr_origin_server)
+
+    @property
+    def address(self):
+        return self.addr_origin_server
+
+    def collect_incoming_data(self, data):
+        if self.is_tunnel:
+            self.receiver.push(data)
+        else:
+            self.raw_msg += data
+
+    def found_terminator(self):
+        terminator = self.get_terminator()
+
+        if isinstance(terminator, basestring):
+            if self.reading_chunk:
+                self.handle_chunk()
+            else:
+                self.handle_header()
+        elif isinstance(terminator, (int, long)):
+            if self.reading_chunk:
+                self.handle_chunk()
+            else:
+                self.handle_body()
+        else:
+            raise Exception('got un-expected terminator ' + repr(terminator))
+
     def handle_connect_event(self):
         try:
-            asynchat.async_chat.handle_connect_event(self)
+            async_chat_wrapper.handle_connect_event(self)
         except socket.timeout:
             msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
                           protocol_version=self.server.protocol_version)
             self.receiver.push(msg)
             self.close_when_done()
 
+            if self.server.args.log_conn_status:
+                print '%s connect to %s timeout' % (self.date_time_string(), self.address_string())
+        except socket.error, ex:
+            if ex.errno == errno.ETIMEDOUT:
+                msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                              protocol_version=self.server.protocol_version)
+                self.receiver.push(msg)
+                self.close_when_done()
+
+            if self.server.args.log_conn_status:
+                print '%s connect to %s timeout' % (self.date_time_string(), self.address_string())
+            else:
+                raise ex
+
     def handle_connect(self):
-        if self.server.args.vvv:
-            print
-            print '>>> %s connected' % self.addr_server_formatted
-
-    def collect_incoming_data(self, data):
-        if not self.is_tunnel:
-            self.raw_msg += data
-        else:
-            if self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=repr(data), msg_type='response(forward)')
-            self.receiver.push(data)
-
-
-    def found_terminator(self):
-        terminator = self.get_terminator()
-
-        if self.server.args.vvv:
-            print
-            print '>>> sender terminator', repr(terminator)
-
-        if isinstance(terminator, basestring):
-            if not self.reading_chunk:
-                self._handle_header()
-            else:
-                self._handle_body_in_chunked()
-
-        elif isinstance(terminator, (int, long)):
-            if not self.reading_chunk:
-                self.msg_resp = HTTPResponse(msg=self.raw_msg)
-
-                if self.server.args.v:
-                    print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
-                elif self.server.args.vv or self.server.args.vvv:
-                    print_msg(msg=self.raw_msg, msg_type='response')
-
-                if terminator is 0:
-                    self.receiver.push(self.raw_msg)
-                else:
-                    self.receiver.push(self.raw_msg)
-                    print >>sys.stderr, 'WARNING: %s received bytes less than expected, remain %d bytes in server' % (self, terminator)
-            else:
-                self._handle_body_in_chunked()
+        if self.server.args.log_conn_status:
+            print '%s connect to %s' % (self.date_time_string(), self.address_string())
 
     def handle_close(self):
-        self.receiver.close()
-        self.close()
+        async_chat_wrapper.handle_close(self)
 
-        if self.server.args.vvv:
-            print
-            print '>>> %s disconnect' % self.addr_server_formatted
+        if self.server.args.log_conn_status:
+            print '%s %s disconnect' % (self.date_time_string(), self.address_string())
 
 
-    def _handle_header(self):
+    def handle_header(self):
         terminator = self.get_terminator()
         self.raw_msg += terminator
 
@@ -449,126 +485,113 @@ class ProxySender(asynchat.async_chat):
                         self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
             cl = self.msg_resp.headers.get_value('Content-Length')
             if cl is not None:
+                self.reading_chunk = False
+                self.user_agent_not_supports_transfer_encoding_chunked = False
+                self.user_agent_supports_transfer_encoding_chunked = False
+
                 cl = int(cl)
-                if cl > 0:
-                    self.set_terminator(cl)
-                else:
-                    self.set_terminator(EOL)
-
-                    if self.server.args.v:
-                        print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
-                    elif self.server.args.vv or self.server.args.vvv:
-                        print_msg(msg=self.raw_msg, msg_type='response')
-
-                    self.receiver.push(self.raw_msg)
-            elif self.msg_resp.is_chunked():
-
-                if self.receiver.msg_req.version >= "HTTP/1.1":
-
-                    self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
-
-                    msg = str(self.msg_resp)
-
-                    if self.server.args.v:
-                        print_msg(msg=msg.split('\r\n')[0], msg_type='response')
-                    elif self.server.args.vv or self.server.args.vvv:
-                        print_msg(msg=msg, msg_type='response')
-
-                    self.receiver.push(msg)
-                    self.raw_msg = ''
-
-                    self.forward_resp_in_chunked_for_ge_http11 = True
-                else:
-                    msg = HTTPHelper.rewriteResp(msg_resp=self.msg_resp, ignore_headers=['Transfer-Encoding'])
-
-                    if self.server.args.v:
-                        print_msg(msg=msg.split('\r\n')[0], msg_type='response')
-                    elif self.server.args.vv or self.server.args.vvv:
-                        print_msg(msg=msg, msg_type='response')
-
-                    self.receiver.push(msg)
-                    self.raw_msg = ''
-
-                    self._forward_resp_in_chunked_for_lt_http11 = True
-
-                self.reading_chunk = True
-                self.set_terminator('\r\n')
-            else:
-                if self.server.args.v:
-                    print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
-                elif self.server.args.vv or self.server.args.vvv:
-                    print_msg(msg=self.raw_msg, msg_type='response')
 
                 self.receiver.push(self.raw_msg)
+                self.raw_msg = ''
+
+                if cl > 0:
+                    self.set_terminator(cl)
+                    return
+
+            elif self.msg_resp.is_chunked():
+                if self.receiver.msg_req.version >= "HTTP/1.1":
+                    self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
+                    self.receiver.push(str(self.msg_resp))
+                    self.raw_msg = ''
+
+                    self.user_agent_supports_transfer_encoding_chunked = True
+                else:
+                    self.msg_resp = HTTPResponse(msg=self.raw_msg, ignores_headers=['Transfer-Encoding'])
+                    self.receiver.push(str(self.msg_resp))
+                    self.raw_msg = ''
+
+                    self.user_agent_not_supports_transfer_encoding_chunked = True
+
+                self.reading_chunk = True
+                self.set_terminator(CHUNK_EOL)
+                return
+            else:
+                self.receiver.push(self.raw_msg)
+                self.raw_msg = ''
         else:
-            if self.server.args.v:
-                print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='response')
-            elif self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=self.raw_msg, msg_type='response')
+            self.reading_chunk = False
 
             self.receiver.push(self.raw_msg)
+            self.raw_msg = ''
 
-    def _handle_body_in_chunked(self):
-        if self.forward_resp_in_chunked_for_ge_http11:
-            data = self.raw_msg + '\r\n'
+        self.set_terminator(EOL)
 
-            if self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=repr(data), msg_type='response(chunk)')
+    def handle_body(self):
+        self.receiver.push(self.raw_msg)
 
+        if self.server.args.log_access:
+            self.server.log_request(
+                addr_client=self.receiver.addr_client[0],
+                request_line=self.receiver.msg_req.request_line,
+                code=self.msg_resp.status_code,
+                size=len(self.raw_msg))
+
+        self.raw_msg = ''
+        self.msg_resp = None
+        self.receiver.msg_req = None
+
+        self.set_terminator(EOL)
+
+    def handle_chunk(self):
+        terminator = self.get_terminator()
+
+        if self.user_agent_supports_transfer_encoding_chunked:
+            data = self.raw_msg + terminator
             self.receiver.push(data)
             self.raw_msg = ''
 
-        elif self._forward_resp_in_chunked_for_lt_http11:
-            terminator = self.get_terminator()
-
+        elif self.user_agent_not_supports_transfer_encoding_chunked:
             if isinstance(terminator, basestring):
-                chunk = self.chunks[-1]
-                self.chunks.append(self.raw_msg)
+                assert terminator == CHUNK_EOL
+                chunk_data = self.raw_msg
+                splits = chunk_data.rstrip(CHUNK_EOL).split(';')
                 self.raw_msg = ''
-
-                splits = chunk.rstrip('\r\n').split(';')
                 chunk_size = int(splits[0], 16)
 
                 if len(splits) > 1:
                     chunk_ext_list = splits[1:]
 
                 if chunk_size is 0: # last-chunk
-                    self.set_terminator('\r\n')
-
-                    gz = gzip.GzipFile(fileobj=StringIO.StringIO(''.join(self.chunks)))
+                    gz = gzip.GzipFile(fileobj=cStringIO.StringIO(s=''.join(self.chunks)))
+                    # TODO: read chunk from gz object for improve performance 
                     body = gz.read()
-
-                    if self.server.args.v:
-                        print_msg(msg=body.split('\r\n')[0], msg_type='response')
-                    elif self.server.args.vv or self.server.args.vvv:
-                        print_msg(msg=body, msg_type='response')
                     self.receiver.push(body)
 
-                    self.set_terminator(EOL)
                     self.reading_chunk = False
+                    self.set_terminator(EOL)
                 else:
                     self.set_terminator(chunk_size)
 
             elif isinstance(terminator, (int, long)):
-                self.set_terminator(EOL)
+                chunk_data = self.raw_msg[:-2] # strip tail CRLF
+                self.chunks.append(chunk_data)
+                self.raw_msg = ''
+                self.set_terminator(CHUNK_EOL)
             else:
-                print >>sys.stderr, 'got unexpected terminator', repr(terminator)
+                raise Exception
+        else:
+            raise Exception
 
 
-class ProxyReceiver(asynchat.async_chat):
-    channel_counter = 0
+class ProxyReceiver(async_chat_wrapper):
 
     def __init__(self, server, (sock_client, addr_client), map):
-        asynchat.async_chat.__init__ (self, sock=sock_client, map=map)
+        async_chat_wrapper.__init__(self, sock=sock_client, map=map)
 
         self.server = server
 
         self.sock_client = sock_client
         self.addr_client = addr_client
-        self.addr_client_formatted = ':'.join(str(i) for i in addr_client)
-
-        self.id = self.channel_counter
-        self.channel_counter = self.channel_counter + 1
 
         self.raw_msg = ''
         self.msg_req = None
@@ -577,136 +600,135 @@ class ProxyReceiver(asynchat.async_chat):
         self.sender = None
         self.is_tunnel = False
 
+    @property
+    def address(self):
+        return self.addr_client
+
     def collect_incoming_data(self, data):
-        if not self.is_tunnel:
-            self.raw_msg += data
-        else:
-            if self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=repr(data), msg_type='request(forward)')
+        if self.is_tunnel:
             self.sender.push(data)
+        else:
+            self.raw_msg += data
 
     def found_terminator(self):
         terminator = self.get_terminator()
 
-        if self.server.args.vvv:
-            print
-            print '>>> receiver terminator:', repr(terminator)
-
         if isinstance(terminator, basestring):
             self.raw_msg += EOL
-
-            if self.server.args.v:
-                print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='request')
-            elif self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=self.raw_msg, msg_type='request')
-
-            self.msg_req = HTTPRequest(self.raw_msg)
-
-            if not HTTPHelper.is_proxy_request(self.msg_req.request_uri) and self.msg_req.method.upper() != "CONNECT":
-                msg = generate_resp(code=httplib.BAD_REQUEST)
-
-                if self.server.args.v:
-                    print_msg(msg=msg.split('\r\n')[0], msg_type='response')
-                elif self.server.args.vv or self.server.args.vvv:
-                    print_msg(msg=msg, msg_type='response')
-                self.push(msg)
-                return
-
-            parses = urlparse.urlparse(self.msg_req.request_uri)
-            if self.msg_req.method.upper() != "CONNECT":
-                addr = HTTPHelper.parse_addr_from_urlparse(parses)
-            else:
-                # self.msg_req.request_uri = 'google.com:443'
-                # urlparse.urlparse(self.msg_req.request_uri)
-                # ParseResult(scheme='', netloc='', path='google.com:443', params='', query='', fragment='')
-                splits = parses.path.split(':')
-                addr = (splits[0], int(splits[1]))
-
-            try:
-                self._setup_sender(addr)
-            except socket.timeout:
-                msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
-                              reason='Forwarding failure',
-                              protocol_version=self.server.protocol_version)
-                self.push(msg)
-                return
-            except socket.error, ex:
-                err_no = ex.args[0]
-                if err_no == errno.ECONNREFUSED:
-                    msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
-                              reason='Forwarding failure',
-                              protocol_version=self.server.protocol_version)
-                    self.push(msg)
-                    return
-                else:
-                    raise ex
-
-            if self.msg_req.method.upper() != "CONNECT":
-                cl = self.msg_req.headers.get_value('Content-Length')
-                if cl is not None:
-                    self.set_terminator(int(cl))
-                else:
-                    self.set_terminator(EOL)
-
-                    msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
-
-                    if self.server.args.v:
-                        print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
-                    elif self.server.args.vv or self.server.args.vvv:
-                        print_msg(msg=msg, msg_type='request(rewritten)')
-
-                    self.sender.push(msg)
-            else:
-                self.set_terminator(None)
-
-                msg = generate_resp(code=httplib.OK,
-                                    reason='Connection established',
-                              headers=['Proxy-Agent: %s' % self.server.server_version],
-                              protocol_version=self.server.protocol_version)
-
-                if self.server.args.v:
-                    print_msg(msg=msg.split('\r\n')[0], msg_type='response')
-                elif self.server.args.vv or self.server.args.vvv:
-                    print_msg(msg=msg, msg_type='response')
-
-                self.push(msg)
-                self.raw_msg = ''
-
-                self.is_tunnel = True
-
-                self.sender.is_tunnel = True
-
+            self.handle_header()
         elif isinstance(terminator, int) or isinstance(terminator, long):
-            if self.server.args.v:
-                print_msg(msg=self.raw_msg.split('\r\n')[0], msg_type='request')
-            elif self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=self.raw_msg, msg_type='request')
+            self.handle_body()
+        else:
+            raise Exception('got un-expected terminator ' + repr(terminator))
 
-            self.msg_req = HTTPRequest(self.raw_msg)
-            msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
-
-            if self.server.args.v:
-                print_msg(msg=msg.split('\r\n')[0], msg_type='request(rewritten)')
-            elif self.server.args.vv or self.server.args.vvv:
-                print_msg(msg=msg, msg_type='request(rewritten)')
-
-            if terminator is 0:
-                self.sender.push(msg)
-            else:
-                self.sender.push(msg)
-                print >>sys.stderr, 'WARNING: %s received bytes less than expected, remain %d bytes in client' % (self, terminator)
-
-
-    def _setup_sender(self, addr):
-        self.sender = ProxySender(self, addr, self._map)
-        self.sender.id = self.id
+    def setup_sender(self, addr):
+        self.sender = ProxySender(proxy_receiver=self, addr_origin_server=addr, socket_map=self._map)
 
     def handle_close(self):
-        self.close()
+        async_chat_wrapper.handle_close(self)
 
-        if self.server.args.vvv:
-            print
-            print '>>> %s disconnect' % self.addr_client_formatted
+        if self.server.args.log_conn_status:
+            print '%s %s disconnect' % (self.date_time_string(), self.address_string())
+
+        self.sender.handle_close()
+
+    def handle_header(self):
+        self.msg_req = HTTPRequest(self.raw_msg)
+
+        if self.msg_req.method.upper() == "CONNECT":
+            self.handle_header_method_connect()
+        else:
+            self.handle_header_method_others()
+
+    def handle_header_method_connect(self):
+        addr = HTTPHelper.parse_addr_from_request_uri(self.msg_req.request_uri)
+
+        try:
+            self.setup_sender(addr)
+        except socket.timeout:
+            msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                          reason='Forwarding failure',
+                          protocol_version=self.server.protocol_version)
+            self.push(msg)
+            return
+        except socket.error, ex:
+            err_no = ex.args[0]
+            if err_no == errno.ECONNREFUSED:
+                msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                          reason='Forwarding failure',
+                          protocol_version=self.server.protocol_version)
+                self.push(msg)
+                return
+            else:
+                raise ex
+
+        msg = generate_resp(code=httplib.OK,
+                            reason='Connection established',
+                      headers=['Proxy-Agent: %s' % self.server.server_version],
+                      protocol_version=self.server.protocol_version)
+        self.push(msg)
+
+        self.raw_msg = ''
+
+        self.is_tunnel = True
+        self.sender.is_tunnel = True
+
+        self.set_terminator(None)
+
+    def handle_header_method_others(self):
+        if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
+            msg = generate_resp(code=httplib.BAD_REQUEST)
+            self.push(msg)
+            return
+
+        addr = HTTPHelper.parse_addr_from_request_uri(self.msg_req.request_uri)
+
+        try:
+            self.setup_sender(addr)
+        except socket.timeout:
+            msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                          reason='Forwarding failure',
+                          protocol_version=self.server.protocol_version)
+            self.push(msg)
+            return
+        except socket.error, ex:
+            err_no = ex.args[0]
+            if err_no == errno.ECONNREFUSED:
+                msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                          reason='Forwarding failure',
+                          protocol_version=self.server.protocol_version)
+                self.push(msg)
+                return
+            else:
+                raise ex
+
+
+        cl = self.msg_req.headers.get_value('Content-Length')
+        if cl is not None:
+            cl = int(cl)
+            
+            msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+            self.sender.push(msg)
+            self.raw_msg = ''
+        
+            if cl > 0:    
+                # continue to receive request body                
+                self.set_terminator(cl)
+            else:
+                # continue to receive next request
+                self.set_terminator(EOL)
+        else:
+            msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+            self.sender.push(msg)
+
+            # continue to receive next request
+            self.set_terminator(EOL)
+
+    def handle_body(self):
+        self.sender.push(self.raw_msg)
+        self.raw_msg = ''
+
+        self.set_terminator(EOL)
 
 
 class HTTPServer(asyncore.dispatcher):
@@ -719,44 +741,110 @@ class HTTPServer(asyncore.dispatcher):
     server_version = "POPS/" + __version__
     args = None
 
-    def __init__(self, server_address, RequestHandlerClass):
+    weekdayname = BaseHTTPServer.BaseHTTPRequestHandler.weekdayname
+    monthname = BaseHTTPServer.BaseHTTPRequestHandler.monthname
+
+    def __init__(self, addr_server, RequestHandlerClass):
         asyncore.dispatcher.__init__(self)
 
+        self.addr_server = addr_server
         self.RequestHandlerClass = RequestHandlerClass
 
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.set_reuse_addr()
-        self.bind(server_address)
+        self.bind(self.addr_server)
         self.listen(self.request_queue_size)
 
+    def date_time_string(self, timestamp=None):
+        """ Return the current date and time formatted for a message header.
+        String format in 'Thu, 06 Nov 2014 07:43:24 GMT'.
+        This copy from BaseHTTPServer.BaseHTTPRequestHandler.
+        """
+        if timestamp is None:
+            timestamp = time.time()
+        year, month, day, hh, mm, ss, wd, y, z = time.gmtime(timestamp)
+        s = "%s, %02d %3s %4d %02d:%02d:%02d GMT" % (
+                self.weekdayname[wd],
+                day, self.monthname[month], year,
+                hh, mm, ss)
+        return s
+
+    def log_date_time_string(self):
+        now = time.time()
+        year, month, day, hh, mm, ss, x, y, z = time.localtime(now)
+        s = "%02d/%3s/%04d %02d:%02d:%02d" % (
+                day, self.monthname[month], year, hh, mm, ss)
+        return s
+
+    def log_request(self, addr_client, request_line, code='-', size='-'):
+        """
+        client-address + " " +  identity-client + " " + user-id + " " + "[date-time-confirms-RFC1123] + " " + start-line + " " +  status-code + " " + response-body-size
+        127.0.0.1 user-identifier frank [10/Oct/2000:13:55:36 -0700] "GET /apache_pb.gif HTTP/1.0" 200 2326
+        http://en.wikipedia.org/wiki/Common_Log_Format
+        """
+        self.log_message(addr_client, '"%s" %s %s', request_line, str(code), str(size))
+
+    def log_error(self, addr_client, format, *args):
+        self.log_message(addr_client, format, *args)
+
+    def log_message(self, addr_client, format, *args):
+        """Log an arbitrary message.
+
+        This is used by all other logging functions.  Override
+        it if you have specific logging wishes.
+
+        The first argument, FORMAT, is a format string for the
+        message to be logged.  If the format string contains
+        any % escapes requiring parameters, they should be
+        specified as subsequent arguments (it's just like
+        printf!).
+
+        The client ip address and current date/time are prefixed to every
+        message.
+        """
+        sys.stderr.write("%s - - [%s] %s\n" %
+                         (addr_client,
+                          self.log_date_time_string(),
+                          format%args))
+
+    def address_string(self):
+        return ':'.join(str(i) for i in self.addr_server)
+
     def serve_forever(self):
+        if self.args.log_process_status:
+            pid = os.getpid()
+            print "%s POPS started, listen on %s, pid:%d" % (self.date_time_string(), self.address_string(), pid)
+
         asyncore.loop(use_select=self.args.select)
 
-    def server_close(self):
-        self.close()
 
     def handle_accept(self):
-        """
-        walk around problem Thundering herd
-        """
+        """ Walking around the Thundering herd problem. """
+        pid = os.getpid()
+        if self.args.log_process_status:
+            print '%s the thundering herd problem, accept awake process, pid:%d' % (self.date_time_string(), pid)
 
-        if self.args.vvv:
-            print 'thundering herd, pid:%d awake' % os.getpid()
         _ = self.accept()
         if not _:
+            if self.args.log_process_status:
+                print '%s the thundering herd problem, process accept failed, pid:%d' % (self.date_time_string(), pid)
             return
-        if self.args.vvv:
-            print 'thundering herd, pid:%d hit' % os.getpid()
+
+        if self.args.log_process_status:
+            print '%s the thundering herd problem, process accept success, pid:%d' % (self.date_time_string(), pid)
 
         sock_client, addr_client = _[0], _[1]
 
-        if self.args.vvv:
-            msg = format_addr(addr_client) + ' connected'
-            print >>sys.stdout, msg
+        handler = self.RequestHandlerClass(self, (sock_client, addr_client), self._map)
 
-        self.RequestHandlerClass(self, (sock_client, addr_client), self._map)
+        if self.args.log_conn_status:
+            print '%s %s connected' % (self.date_time_string(), handler.address_string())
 
-        
+    def server_close(self):
+        """ asyncore.dispatcher.handle_close already does close job. """
+        pass
+
+
 class MyDaemon(object):
     def __init__(self, args):
         self.args = args
@@ -773,17 +861,35 @@ class MyDaemon(object):
 
 def serve_forever(httpd_inst):
     try:
-        print >> sys.stdout, '%s started' % multiprocessing.current_process().name
         httpd_inst.serve_forever()
     finally:
         httpd_inst.server_close()
 
-def main(args):
-    server_address = (args.addr, args.port)
-    processes = int(args.processes)
-    pid = os.getpid()
 
-    httpd_inst = HTTPServer(server_address, ProxyReceiver)
+class DebugLevel(object):
+
+    log_process_status = 1 << 1
+
+    log_conn_status = 1 << 2
+    log_io_status = 1 << 3
+
+    log_access = 1 <<  4
+
+    log_req_recv_header = 1 << 5
+    log_req_recv_body = 1 << 6
+
+    log_resp_recv_header = 1 << 7
+    log_resp_recv_body = 1 << 8
+
+    log_chunk = 1 << 11
+    log_tunnel_data = 1 << 12
+
+
+def main(args):
+    addr_server = (args.addr, args.port)
+    processes = int(args.processes)
+
+    httpd_inst = HTTPServer(addr_server, ProxyReceiver)
     httpd_inst.args = args
 
     if getattr(args, 'http1.0'):
@@ -795,8 +901,6 @@ def main(args):
             p.daemon = args.daemon
         p.start()
 
-    srv_name = 'node'
-    print >> sys.stdout, "POPS %s started, listen on %s:%s, pid %d" % (srv_name, server_address[0], server_address[1], pid)
     try:
         httpd_inst.serve_forever()
     finally:
@@ -822,17 +926,15 @@ if __name__ == "__main__":
                         default=multiprocessing.cpu_count(),
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
 
-    parser.add_argument('-v',
-                        action='store_true',
-                        help='dump headers of request and response into stdout')
+    # parser.add_argument('--processes',
+    #                     default=0,
+    #                     help='default cat /proc/cpuinfo | grep processor | wc -l')
 
-    parser.add_argument('-vv',
-                        action='store_true',
-                        help='dump body of request and response into stdout')
-
-    parser.add_argument('-vvv',
-                        action='store_true',
-                        help='dump anything into stdout')
+    debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
+    debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
+    for item in debug_level_list:
+        key = item[0]
+        parser.add_argument('--' + key, action='store_true', help='debug level settings')
 
     parser.add_argument('--http1.0',
                         action='store_true',
