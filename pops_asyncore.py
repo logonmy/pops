@@ -489,8 +489,8 @@ class ProxySender(async_chat_wrapper):
         if self.server.args.log_conn_status:
             print '%s origin-server %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
 
-        # Sometime upstream server close actively first,
-        # We have to actively disconnect client connection, too.
+        # Sometime upstream/origin server close actively,
+        # We have to disconnect client connection after it.
         if not self.receiver.socket_closed:
            self.receiver.handle_close()
 
@@ -508,7 +508,7 @@ class ProxySender(async_chat_wrapper):
             cl = self.msg_resp.headers.get_value('Content-Length')
 
             # For confirm to http://tools.ietf.org/html/rfc7230#section-3.3.3,
-            # we detect body encoding if in chunked before content-length field.
+            # we detect body if it encoding in chunked before content-length field existing.
             if self.msg_resp.is_chunked():
                 if self.receiver.msg_req.version >= "HTTP/1.1":
                     self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
@@ -682,7 +682,7 @@ class ProxyReceiver(async_chat_wrapper):
         if self.server.args.log_conn_status:
             print '%s user-agent %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
 
-        if not self.sender.socket_closed:
+        if self.sender and not self.sender.socket_closed:
             try:
                 self.sender.handle_close()
             except socket.error, ex:
@@ -960,13 +960,13 @@ class DebugLevel(object):
     log_access = 1 <<  4
 
     log_req_recv_header = 1 << 5
-    log_req_recv_body = 1 << 6
+    # log_req_recv_body = 1 << 6
 
     log_resp_recv_header = 1 << 7
-    log_resp_recv_body = 1 << 8
+    # log_resp_recv_body = 1 << 8
 
-    log_chunk = 1 << 11
-    log_tunnel_data = 1 << 12
+    # log_chunk = 1 << 11
+    # log_tunnel_data = 1 << 12
 
 
 def main(args):

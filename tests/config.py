@@ -6,4 +6,4 @@ password = 'hidemyass'
 
 proxies = {'http': 'http://' + proxy_host + ':' + str(proxy_port)}
 
-timeout = 3.0
+timeout = 5.0
