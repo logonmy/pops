@@ -486,11 +486,10 @@ class ProxySender(async_chat_wrapper):
                           headers=['Proxy-Agent: %s' % self.server.server_version],
                           protocol_version=self.server.protocol_version)
 
-            self.receiver.raw_msg_is_resp = False
             self.receiver.push(self.receiver.raw_msg)
 
-            # self.receiver.raw_msg_is_resp = True
-            # self.receiver.handle_body()
+            self.receiver.raw_msg_is_resp = True
+            self.receiver.handle_body()
 
             self.receiver.set_terminator(None)
 
