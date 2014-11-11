@@ -75,7 +75,7 @@ class TestMethodCONNECT(unittest.TestCase):
         # self.assertEqual(len(body_got), len(body_expected))
         # self.assertEqual(hashlib.md5(body_got).hexdigest(), hashlib.md5(body_expected).hexdigest())
 
-        url = 'https://tools.ietf.org/html/rfc1945.html'
+        url = 'https://tools.ietf.org/html/rfc868.html'
         r = requests.head(url=url, verify=False, proxies=proxies)
         status_code = r.status_code
         entry_body = r.text
@@ -84,7 +84,7 @@ class TestMethodCONNECT(unittest.TestCase):
         self.assertEqual(entry_body, '')
 
     def test_method_get(self):
-        url = 'https://tools.ietf.org/html/rfc1945.html'
+        url = 'https://tools.ietf.org/html/rfc868.html'
         r = requests.get(url=url, verify=False, proxies=proxies)
         status_code = r.status_code
         entry_body = r.text
