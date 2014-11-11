@@ -35,7 +35,7 @@ try:
 except ImportError:
     color = None
 
-__version__ = "201408-r6"
+__version__ = "201411"
 
 SERVER_RECV_TEIMOUT = 10.0
 

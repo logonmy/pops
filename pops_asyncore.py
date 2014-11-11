@@ -1035,6 +1035,18 @@ if __name__ == "__main__":
 
     parser.add_argument('--version', action='version', version=__version__)
 
+    parser.add_argument('--auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
+    parser.add_argument('--proxy_auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
+    parser.add_argument('--proxy_node_auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
     parser.add_argument('--addr',
                         default='127.0.0.1',
                         help='default 127.0.0.1')
@@ -1044,19 +1056,22 @@ if __name__ == "__main__":
                         default=1080,
                         help='default 1080')
 
+    parser.add_argument('--mode',
+                        choices=['slot', 'node'],
+                        default='node',
+                        help='default node')
+
     parser.add_argument('--processes',
                         default=multiprocessing.cpu_count(),
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
 
-    debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
-    debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
-    for item in debug_level_list:
-        key = item[0]
-        parser.add_argument('--' + key, action='store_true', help='debug level settings')
+    parser.add_argument('--verbose',
+                        action='store_true',
+                        help='dump headers of request and response into stdout, it requires --processes=0')
 
     parser.add_argument('--http1.0',
                         action='store_true',
-                        help='force proxy server using HTTP/1.0')
+                        help='dump entry body of request and response into stdout, it requires --verbose')
 
     parser.add_argument('--error_log',
                         help='default /dev/null')
@@ -1067,9 +1082,17 @@ if __name__ == "__main__":
 
     parser.add_argument('--select', action='store_true')
 
+
     parser.add_argument('--stop',
                         action='store_true',
                         help='default start')
+
+    debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
+    debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
+    for item in debug_level_list:
+        key = item[0]
+        parser.add_argument('--' + key, action='store_true', help='debug level settings')
+
 
     args = parser.parse_args()
 
