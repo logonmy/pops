@@ -352,10 +352,6 @@ class HTTPHelper(object):
 EOL = '\r\n\r\n'
 CHUNK_EOL = '\r\n'
 
-def print_msg(msg, msg_type):
-    print '>>> %s' % msg_type
-    print msg
-
 
 class async_chat_wrapper(asynchat.async_chat):
 
@@ -388,8 +384,8 @@ class async_chat_wrapper(asynchat.async_chat):
     def handle_chunk(self):
         raise NotImplemented
 
-    def handle_tunnel(self):
-        raise NotImplemented
+    # def handle_tunnel(self):
+    #     raise NotImplemented
 
 
 class ProxySender(async_chat_wrapper):
@@ -425,6 +421,9 @@ class ProxySender(async_chat_wrapper):
         return self.addr_origin_server
 
     def collect_incoming_data(self, data):
+        if self.server.args.log_all_out:
+            self.server.log_message('-', 'out: %s, %s', repr(data), repr(self.get_terminator()))
+
         if self.is_tunnel:
             self.receiver.push(data)
         elif self.forward_until_conn_close:
@@ -449,6 +448,7 @@ class ProxySender(async_chat_wrapper):
             raise Exception('got un-expected terminator ' + repr(terminator))
 
     def handle_connect_event(self):
+        """ This function called before handle_connect_event. """
         try:
             async_chat_wrapper.handle_connect_event(self)
         except socket.error, ex:
@@ -462,7 +462,7 @@ class ProxySender(async_chat_wrapper):
                 self.close_when_done()
 
                 if self.server.args.log_conn_status:
-                    print '%s connect to %s refused' % (self.date_time_string(), self.address_string())
+                    self.server.log_message('-', 'connect to %s refused', self.address_string())
             elif ex.errno == errno.ETIMEDOUT:
                 msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
                               protocol_version=self.server.protocol_version)
@@ -470,13 +470,38 @@ class ProxySender(async_chat_wrapper):
                 self.close_when_done()
 
                 if self.server.args.log_conn_status:
-                    print '%s connect to %s timeout' % (self.date_time_string(), self.address_string())
+                    self.server.log_message('-', 'connect to %s timeout', self.address_string())
             else:
                 raise ex
 
+        # We call receiver.handle_body here instead of receiver.handle_header/handle_header_method_connect,
+        # because of sender.connect is non-blocking,
+        # it is possible sender.connected is still equal to False when receiver.setup_sender() done.
+        if self.connected and self.receiver.msg_req.method.upper() == "CONNECT":
+            self.receiver.is_tunnel = True
+            self.is_tunnel = True
+
+            self.receiver.raw_msg = generate_resp(code=httplib.OK,
+                                reason='Connection established',
+                          headers=['Proxy-Agent: %s' % self.server.server_version],
+                          protocol_version=self.server.protocol_version)
+
+            self.receiver.raw_msg_is_resp = False
+            self.receiver.push(self.receiver.raw_msg)
+
+            # self.receiver.raw_msg_is_resp = True
+            # self.receiver.handle_body()
+
+            self.receiver.set_terminator(None)
+
     def handle_connect(self):
+        """ This function called after handle_connect_event. """
         if self.server.args.log_conn_status:
-            print '%s connect to %s, fd:%d' % (self.date_time_string(), self.address_string(), self.socket.fileno())
+            self.server.log_message('-', 'connect to %s, fd:%d', self.address_string(), self.socket.fileno())
+
+    def handle_tunnel(self):
+        self.receiver.push(self.raw_msg)
+        self.raw_msg = ''
 
     def handle_close(self):
         if self.socket_closed:
@@ -487,7 +512,7 @@ class ProxySender(async_chat_wrapper):
         async_chat_wrapper.handle_close(self)
 
         if self.server.args.log_conn_status:
-            print '%s origin-server %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
+            self.server.log_message('-', 'origin-server %s disconnect, fd:%d', self.address_string(), fd)
 
         # Sometime upstream/origin server close actively,
         # We have to disconnect client connection after it.
@@ -497,6 +522,9 @@ class ProxySender(async_chat_wrapper):
     def handle_header(self):
         terminator = self.get_terminator()
         self.raw_msg += terminator
+
+        if self.server.args.log_resp_recv_header:
+            self.server.log_message('-', 'receive response headers: %s', repr(self.raw_msg.split(EOL)[0]))
 
         self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
@@ -556,16 +584,24 @@ class ProxySender(async_chat_wrapper):
     def handle_body(self):
         self.receiver.push(self.raw_msg)
 
-        if self.server.args.log_access:
-            if self.raw_msg:
-                bytes = len(self.raw_msg.split(EOL)[-1])
-            else:
-                bytes = 0
-            self.server.log_request(
-                addr_client=self.receiver.addr_client[0],
-                request_line=self.receiver.msg_req.request_line,
-                code=self.msg_resp.status_code,
-                size=bytes)
+        if self.server.args.log_access or self.server.args.log_req_recv_body:
+
+            splits = self.raw_msg.split(EOL)
+            body = splits[-1]
+
+            if self.server.args.log_access:
+                if self.raw_msg:
+                    bytes = len(body)
+                else:
+                    bytes = 0
+                self.server.log_request(
+                    addr_client=self.receiver.addr_client[0],
+                    request_line=self.receiver.msg_req.request_line,
+                    code=self.msg_resp.status_code,
+                    size=bytes)
+
+            if self.server.args.log_req_recv_body:
+                self.server.log_message('-', 'receive request body: %s', repr(body))
 
         self.raw_msg = ''
         field_expect = self.receiver.msg_req.headers.get_value('Expect')
@@ -645,6 +681,9 @@ class ProxyReceiver(async_chat_wrapper):
         return self.addr_client
 
     def collect_incoming_data(self, data):
+        if self.server.args.log_all_out:
+            self.server.log_message('-', 'in: %s, %s', repr(data), repr(self.get_terminator()))
+
         if self.is_tunnel:
             self.sender.push(data)
         else:
@@ -680,7 +719,7 @@ class ProxyReceiver(async_chat_wrapper):
         async_chat_wrapper.handle_close(self)
 
         if self.server.args.log_conn_status:
-            print '%s user-agent %s disconnect, fd:%d' % (self.date_time_string(), self.address_string(), fd)
+            self.server.log_message('-', 'user-agent %s disconnect, fd:%d', self.address_string(), fd)
 
         if self.sender and not self.sender.socket_closed:
             try:
@@ -690,11 +729,14 @@ class ProxyReceiver(async_chat_wrapper):
                     fd = -1
 
                     if self.server.args.log_conn_status:
-                        print '%s origin-server %s disconnect, fd:%d' % (self.date_time_string(), self.sender.address_string(), fd)
+                        self.server.log_message('-', 'origin-server %s disconnect, fd:%d', self.sender.address_string(), fd)
                 else:
                     raise ex
 
     def handle_header(self):
+        if self.server.args.log_req_recv_header:
+            self.server.log_message('-', 'receive request headers: %s', repr(self.raw_msg.split(EOL)[0]))
+
         self.msg_req = HTTPRequest(self.raw_msg)
 
         if self.msg_req.method.upper() == "CONNECT":
@@ -724,19 +766,6 @@ class ProxyReceiver(async_chat_wrapper):
                 return
             else:
                 raise ex
-
-        if self.sender.connected:
-            self.raw_msg = generate_resp(code=httplib.OK,
-                                reason='Connection established',
-                          headers=['Proxy-Agent: %s' % self.server.server_version],
-                          protocol_version=self.server.protocol_version)
-            self.raw_msg_is_resp = True
-            self.handle_body()
-
-            self.is_tunnel = True
-            self.sender.is_tunnel = True
-
-            self.set_terminator(None)
 
     def handle_header_method_others(self):
         if not HTTPHelper.is_proxy_request(self.msg_req.request_uri):
@@ -788,22 +817,31 @@ class ProxyReceiver(async_chat_wrapper):
             self.handle_body()
 
     def handle_body(self):
-        self.sender.push(self.raw_msg)
+        if not self.is_tunnel:
+            self.sender.push(self.raw_msg)
 
-        if self.server.args.log_access and self.raw_msg_is_resp:
-            if self.raw_msg:
-                bytes = len(self.raw_msg.split(EOL)[-1])
-            else:
-                bytes = 0
-            msg_resp = HTTPResponse(msg=self.raw_msg)
+        if self.raw_msg_is_resp:
+            if self.server.args.log_access or self.server.args.log_resp_recv_body:
+                splits = self.raw_msg.split(EOL)
+                body = splits[-1]
 
-            self.server.log_request(
-                addr_client=self.addr_client[0],
-                request_line=self.msg_req.request_line,
-                code=msg_resp.status_code,
-                size=bytes)
+                if self.server.args.log_access:
+                    if self.raw_msg:
+                        bytes = len(body)
+                    else:
+                        bytes = 0
+                    msg_resp = HTTPResponse(msg=self.raw_msg)
 
-            self.raw_msg_is_resp = False
+                    self.server.log_request(
+                        addr_client=self.addr_client[0],
+                        request_line=self.msg_req.request_line,
+                        code=msg_resp.status_code,
+                        size=bytes)
+
+                if self.server.args.log_resp_recv_body:
+                    self.server.log_message('-', 'receive response body: %s', repr(body))
+
+                self.raw_msg_is_resp = False
 
         self.raw_msg = ''
 
@@ -812,7 +850,8 @@ class ProxyReceiver(async_chat_wrapper):
         #
         # self.msg_req = None
 
-        self.set_terminator(EOL)
+        if not self.is_tunnel:
+            self.set_terminator(EOL)
 
 
 class HTTPServer(asyncore.dispatcher):
@@ -855,7 +894,7 @@ class HTTPServer(asyncore.dispatcher):
 
     def log_date_time_string(self):
         now = time.time()
-        year, month, day, hh, mm, ss, x, y, z = time.localtime(now)
+        year, month, day, hh, mm, ss, x, y, z = time.gmtime(now)
         s = "%02d/%3s/%04d %02d:%02d:%02d" % (
                 day, self.monthname[month], year, hh, mm, ss)
         return s
@@ -897,7 +936,7 @@ class HTTPServer(asyncore.dispatcher):
     def serve_forever(self):
         if self.args.log_process_status:
             pid = os.getpid()
-            print "%s POPS started, listen on %s, pid:%d" % (self.date_time_string(), self.address_string(), pid)
+            self.log_message('-', 'POPS started, listen on %s, pid:%d', self.address_string(), pid)
 
         asyncore.loop(use_select=self.args.select)
 
@@ -906,23 +945,23 @@ class HTTPServer(asyncore.dispatcher):
         """ Walking around the Thundering herd problem. """
         pid = os.getpid()
         if self.args.log_process_status:
-            print '%s the thundering herd problem, accept awake process, pid:%d' % (self.date_time_string(), pid)
+            self.server.log_message('-', 'the thundering herd problem, accept awake process, pid:%d', pid)
 
         _ = self.accept()
         if not _:
             if self.args.log_process_status:
-                print '%s the thundering herd problem, process accept failed, pid:%d' % (self.date_time_string(), pid)
+                self.log_message('-', 'the thundering herd problem, process accept failed, pid:%d', pid)
             return
 
         if self.args.log_process_status:
-            print '%s the thundering herd problem, process accept success, pid:%d' % (self.date_time_string(), pid)
+            self.log_message('-', 'the thundering herd problem, process accept success, pid:%d', pid)
 
         sock_client, addr_client = _[0], _[1]
 
         handler = self.RequestHandlerClass(self, (sock_client, addr_client), self._map)
 
         if self.args.log_conn_status:
-            print '%s %s connected, fd:%d' % (self.date_time_string(), handler.address_string(), sock_client.fileno())
+            self.log_message('-', '%s connected, fd:%d', handler.address_string(), sock_client.fileno())
 
     def server_close(self):
         """ asyncore.dispatcher.handle_close already does close job. """
@@ -957,16 +996,16 @@ class DebugLevel(object):
     log_conn_status = 1 << 2
     log_io_status = 1 << 3
 
-    log_access = 1 <<  4
+    log_access = 1 << 4
 
     log_req_recv_header = 1 << 5
-    # log_req_recv_body = 1 << 6
+    log_req_recv_body = 1 << 6
 
     log_resp_recv_header = 1 << 7
-    # log_resp_recv_body = 1 << 8
+    log_resp_recv_body = 1 << 8
 
-    # log_chunk = 1 << 11
-    # log_tunnel_data = 1 << 12
+    log_all_in = 1 << 9
+    log_all_out = 1 << 10
 
 
 def main(args):
@@ -1009,10 +1048,6 @@ if __name__ == "__main__":
     parser.add_argument('--processes',
                         default=multiprocessing.cpu_count(),
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
-
-    # parser.add_argument('--processes',
-    #                     default=0,
-    #                     help='default cat /proc/cpuinfo | grep processor | wc -l')
 
     debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
     debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
