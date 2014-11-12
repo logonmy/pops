@@ -9,8 +9,10 @@ TODO:
  - custom connect/read/write timeout via custom asyncore.loop/socket_map/poll_func
 """
 import BaseHTTPServer
+import base64
 import cStringIO
 import argparse
+import functools
 import asyncore_patch; asyncore_patch.patch_all()
 import time
 import errno
@@ -242,8 +244,7 @@ def generate_resp(code,
     status_line = "%s %d %s" % (protocol_version, code, reason)
 
     if not body and using_body_template and code != httplib.OK:
-        body = (DEFAULT_ERROR_MESSAGE %
-               {'code': code, 'message': BaseHTTPServer._quote_html(reason), 'explain': explain})
+        body = DEFAULT_ERROR_MESSAGE % ({'code': code, 'message': BaseHTTPServer._quote_html(reason), 'explain': explain})
     else:
         body = ''
 
@@ -263,7 +264,7 @@ def generate_resp(code,
     lines.extend(other_headers)
 
     if body:
-        line = "Content-Type: %s" % BaseHTTPServer.DEFAULT_ERROR_CONTENT_TYPE,
+        line = "Content-Type: %s" % BaseHTTPServer.DEFAULT_ERROR_CONTENT_TYPE
         lines.append(line)
         msg = '\r\n'.join(lines) + EOL + body
     else:
@@ -655,6 +656,30 @@ class ProxySender(async_chat_wrapper):
             raise Exception
 
 
+def required_proxy_auth(func):
+    def check_proxy_authorization(handler_obj):
+        value = handler_obj.msg_req.headers.get_value('proxy-authorization')
+        if value:
+            if value.replace('Basic ', '').strip() == handler_obj.server.proxy_auth_base64:
+                return True
+        return False
+
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):
+        if handler_obj.server.proxy_auth_base64 and \
+                not check_proxy_authorization(handler_obj):
+
+            handler_obj.raw_msg = generate_resp(code=httplib.PROXY_AUTHENTICATION_REQUIRED, using_body_template=True)
+            handler_obj.raw_msg_is_resp = True
+            handler_obj.push(handler_obj.raw_msg)
+            handler_obj.handle_body()
+            return
+        else:
+            return func(handler_obj, *args, **kwargs)
+
+    return _wrapped
+
+
 class ProxyReceiver(async_chat_wrapper):
 
     def __init__(self, server, (sock_client, addr_client), map):
@@ -693,6 +718,7 @@ class ProxyReceiver(async_chat_wrapper):
 
         if isinstance(terminator, basestring):
             self.raw_msg += EOL
+            self.msg_req = HTTPRequest(self.raw_msg)
             self.handle_header()
         elif isinstance(terminator, int) or isinstance(terminator, long):
             self.handle_body()
@@ -732,11 +758,12 @@ class ProxyReceiver(async_chat_wrapper):
                 else:
                     raise ex
 
+    @required_proxy_auth
     def handle_header(self):
         if self.server.args.log_req_recv_header:
+            # We using `self.raw_msg` instead of `self.msg_req` for printing original headers information
+            # without any transform and modifies.
             self.server.log_message('-', 'receive request headers: %s', repr(self.raw_msg.split(EOL)[0]))
-
-        self.msg_req = HTTPRequest(self.raw_msg)
 
         if self.msg_req.method.upper() == "CONNECT":
             self.handle_header_method_connect()
@@ -816,7 +843,7 @@ class ProxyReceiver(async_chat_wrapper):
             self.handle_body()
 
     def handle_body(self):
-        if not self.is_tunnel:
+        if not self.is_tunnel and self.sender:
             self.sender.push(self.raw_msg)
 
         if self.raw_msg_is_resp:
@@ -862,6 +889,10 @@ class HTTPServer(asyncore.dispatcher):
     protocol_version = DEFAULT_PROTOCOL_VERSION
     server_version = "POPS/" + __version__
     args = None
+
+    auth_base64 = None
+    proxy_auth_base64 = None
+    proxy_node_auth_base64 = None
 
     weekdayname = BaseHTTPServer.BaseHTTPRequestHandler.weekdayname
     monthname = BaseHTTPServer.BaseHTTPRequestHandler.monthname
@@ -1016,6 +1047,16 @@ def main(args):
 
     if getattr(args, 'http1.0'):
         httpd_inst.protocol_version = 'HTTP/1.0'
+
+    if args.auth:
+        httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
+
+    if args.proxy_auth:
+        httpd_inst.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
+
+    if args.proxy_node_auth:
+        httpd_inst.proxy_node_auth_base64 = base64.encodestring(args.proxy_node_auth).strip()
+
 
     for i in range(processes):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
