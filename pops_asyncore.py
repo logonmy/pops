@@ -9,8 +9,10 @@ TODO:
  - custom connect/read/write timeout via custom asyncore.loop/socket_map/poll_func
 """
 import BaseHTTPServer
+import base64
 import cStringIO
 import argparse
+import functools
 import asyncore_patch; asyncore_patch.patch_all()
 import time
 import errno
@@ -155,9 +157,8 @@ class HTTPMessage(object):
         self.headers = HTTPHeadersCaseSensitive(lines=lines[1:], ignores=ignores_headers)
 
     def is_chunked(self):
-        cl = self.headers.get_value('Content-Length')
         te = self.headers.get_value('Transfer-Encoding')
-        return cl is None and te and te.lower() == 'chunked'
+        return te and te.lower() == 'chunked'
 
     def __str__(self):
         lines = [self.start_line]
@@ -242,8 +243,7 @@ def generate_resp(code,
     status_line = "%s %d %s" % (protocol_version, code, reason)
 
     if not body and using_body_template and code != httplib.OK:
-        body = (DEFAULT_ERROR_MESSAGE %
-               {'code': code, 'message': BaseHTTPServer._quote_html(reason), 'explain': explain})
+        body = DEFAULT_ERROR_MESSAGE % ({'code': code, 'message': BaseHTTPServer._quote_html(reason), 'explain': explain})
     else:
         body = ''
 
@@ -263,7 +263,7 @@ def generate_resp(code,
     lines.extend(other_headers)
 
     if body:
-        line = "Content-Type: %s" % BaseHTTPServer.DEFAULT_ERROR_CONTENT_TYPE,
+        line = "Content-Type: %s" % BaseHTTPServer.DEFAULT_ERROR_CONTENT_TYPE
         lines.append(line)
         msg = '\r\n'.join(lines) + EOL + body
     else:
@@ -384,8 +384,6 @@ class async_chat_wrapper(asynchat.async_chat):
     def handle_chunk(self):
         raise NotImplemented
 
-    # def handle_tunnel(self):
-    #     raise NotImplemented
 
 
 class ProxySender(async_chat_wrapper):
@@ -498,10 +496,6 @@ class ProxySender(async_chat_wrapper):
         if self.server.args.log_conn_status:
             self.server.log_message('-', 'connect to %s, fd:%d', self.address_string(), self.socket.fileno())
 
-    def handle_tunnel(self):
-        self.receiver.push(self.raw_msg)
-        self.raw_msg = ''
-
     def handle_close(self):
         if self.socket_closed:
             return
@@ -527,58 +521,71 @@ class ProxySender(async_chat_wrapper):
 
         self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
-        if self.receiver.msg_req.method.upper() != 'HEAD' and \
-                        self.msg_resp.status_code >= httplib.OK and \
-                        self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
 
-            conn = self.msg_resp.headers.get_value('Connection')
-            cl = self.msg_resp.headers.get_value('Content-Length')
+        field_cl = self.msg_resp.headers.get_value('Content-Length')
 
-            # For confirm to http://tools.ietf.org/html/rfc7230#section-3.3.3,
-            # we detect body if it encoding in chunked before content-length field existing.
-            if self.msg_resp.is_chunked():
-                if self.receiver.msg_req.version >= "HTTP/1.1":
-                    self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
-                    self.receiver.push(str(self.msg_resp))
-                    self.raw_msg = ''
+        # confirm to http://tools.ietf.org/html/rfc7230#section-3.3.3, rule 1
+        if self.receiver.msg_req.method.upper() == 'HEAD' or \
+                (self.msg_resp.status_code >= httplib.CONTINUE and self.msg_resp.status_code < httplib.OK) or \
+                        self.msg_resp.status_code in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
+            self.handle_body()
+            return
 
-                    self.user_agent_supports_transfer_encoding_chunked = True
-                else:
-                    self.msg_resp = HTTPResponse(msg=self.raw_msg, ignores_headers=['Transfer-Encoding'])
-                    self.receiver.push(str(self.msg_resp))
-                    self.raw_msg = ''
+        # We handle rule 2 in `self.handle_connect_event`.
+        if self.receiver.msg_req.method.upper() == "CONNECT":
+            assert False
 
-                    self.user_agent_not_supports_transfer_encoding_chunked = True
-
-                self.reading_chunk = True
-                self.set_terminator(CHUNK_EOL)
-                return
-
-            elif cl is not None:
-                try:
-                    cl = int(cl)
-                except ValueError:
-                    self.raw_msg = generate_resp(code=httplib.BAD_REQUEST)
-                    self.msg_resp = HTTPResponse(msg=self.raw_msg)
-                    self.handle_body()
-                    return
-
-                self.receiver.push(self.raw_msg)
+        # rule 3, detect body if it encoding in chunked before content-length field existing.
+        if self.msg_resp.is_chunked():
+            if self.receiver.msg_req.version >= "HTTP/1.1":
+                self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
+                self.receiver.push(str(self.msg_resp))
                 self.raw_msg = ''
 
-                if cl > 0:
-                    self.set_terminator(cl)
-                    return
-
-                self.handle_body()
-
-            elif conn.lower() == 'close':
-                self.forward_until_conn_close = True
-                self.set_terminator(None)
+                self.user_agent_supports_transfer_encoding_chunked = True
             else:
+                self.msg_resp = HTTPResponse(msg=self.raw_msg, ignores_headers=['Transfer-Encoding'])
+                self.receiver.push(str(self.msg_resp))
+                self.raw_msg = ''
+
+                self.user_agent_not_supports_transfer_encoding_chunked = True
+
+            self.reading_chunk = True
+            self.set_terminator(CHUNK_EOL)
+            return
+
+        # rule 4 and rule 5
+        if field_cl is not None:
+            try:
+                field_cl = int(field_cl)
+            except ValueError:
+                self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
                 self.handle_body()
-        else:
-            self.handle_body()
+                self.handle_close()
+                return
+
+            self.receiver.push(self.raw_msg)
+            self.raw_msg = ''
+
+            if field_cl > 0:
+                self.set_terminator(field_cl)
+                return
+            elif field_cl < 0:
+                self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
+                self.handle_body()
+                self.handle_close()
+                return
+            else:
+                # rule 6
+                self.handle_body()
+                return
+
+        # rule 7
+        self.handle_body()
+        self.forward_until_conn_close = True
+        self.set_terminator(None)
 
     def handle_body(self):
         self.receiver.push(self.raw_msg)
@@ -655,6 +662,30 @@ class ProxySender(async_chat_wrapper):
             raise Exception
 
 
+def required_proxy_auth(func):
+    def check_proxy_authorization(handler_obj):
+        value = handler_obj.msg_req.headers.get_value('proxy-authorization')
+        if value:
+            if value.replace('Basic ', '').strip() == handler_obj.server.proxy_auth_base64:
+                return True
+        return False
+
+    @functools.wraps(func)
+    def _wrapped(handler_obj, *args, **kwargs):
+        if handler_obj.server.proxy_auth_base64 and \
+                not check_proxy_authorization(handler_obj):
+
+            handler_obj.raw_msg = generate_resp(code=httplib.PROXY_AUTHENTICATION_REQUIRED, using_body_template=True)
+            handler_obj.raw_msg_is_resp = True
+            handler_obj.push(handler_obj.raw_msg)
+            handler_obj.handle_body()
+            return
+        else:
+            return func(handler_obj, *args, **kwargs)
+
+    return _wrapped
+
+
 class ProxyReceiver(async_chat_wrapper):
 
     def __init__(self, server, (sock_client, addr_client), map):
@@ -693,6 +724,7 @@ class ProxyReceiver(async_chat_wrapper):
 
         if isinstance(terminator, basestring):
             self.raw_msg += EOL
+            self.msg_req = HTTPRequest(self.raw_msg)
             self.handle_header()
         elif isinstance(terminator, int) or isinstance(terminator, long):
             self.handle_body()
@@ -732,11 +764,12 @@ class ProxyReceiver(async_chat_wrapper):
                 else:
                     raise ex
 
+    @required_proxy_auth
     def handle_header(self):
         if self.server.args.log_req_recv_header:
+            # We using `self.raw_msg` instead of `self.msg_req` for printing original headers information
+            # without any transform and modifies.
             self.server.log_message('-', 'receive request headers: %s', repr(self.raw_msg.split(EOL)[0]))
-
-        self.msg_req = HTTPRequest(self.raw_msg)
 
         if self.msg_req.method.upper() == "CONNECT":
             self.handle_header_method_connect()
@@ -808,15 +841,25 @@ class ProxyReceiver(async_chat_wrapper):
             if cl > 0:
                 # continue to receive request body
                 self.set_terminator(cl)
+            elif cl == 0:
+                self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+                self.handle_body()
             else:
-                # continue to receive next request
-                self.set_terminator(EOL)
+                self.raw_msg = generate_resp(code=httplib.BAD_REQUEST, close_it=True)
+                self.raw_msg_is_resp = True
+
+                # call `self.push` to send response directly, and `self.handle_body` for logging
+                self.push(self.raw_msg)
+                self.handle_body()
+
+                self.close_when_done()
+
         else:
             self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
             self.handle_body()
 
     def handle_body(self):
-        if not self.is_tunnel:
+        if not self.is_tunnel and self.sender:
             self.sender.push(self.raw_msg)
 
         if self.raw_msg_is_resp:
@@ -862,6 +905,10 @@ class HTTPServer(asyncore.dispatcher):
     protocol_version = DEFAULT_PROTOCOL_VERSION
     server_version = "POPS/" + __version__
     args = None
+
+    auth_base64 = None
+    proxy_auth_base64 = None
+    proxy_node_auth_base64 = None
 
     weekdayname = BaseHTTPServer.BaseHTTPRequestHandler.weekdayname
     monthname = BaseHTTPServer.BaseHTTPRequestHandler.monthname
@@ -1017,6 +1064,16 @@ def main(args):
     if getattr(args, 'http1.0'):
         httpd_inst.protocol_version = 'HTTP/1.0'
 
+    if args.auth:
+        httpd_inst.auth_base64 = base64.encodestring(args.auth).strip()
+
+    if args.proxy_auth:
+        httpd_inst.proxy_auth_base64 = base64.encodestring(args.proxy_auth).strip()
+
+    if args.proxy_node_auth:
+        httpd_inst.proxy_node_auth_base64 = base64.encodestring(args.proxy_node_auth).strip()
+
+
     for i in range(processes):
         p = multiprocessing.Process(target=serve_forever, args=(httpd_inst,))
         if args.daemon:
@@ -1035,6 +1092,18 @@ if __name__ == "__main__":
 
     parser.add_argument('--version', action='version', version=__version__)
 
+    parser.add_argument('--auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
+    parser.add_argument('--proxy_auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
+    parser.add_argument('--proxy_node_auth',
+                        default='god:hidemyass',
+                        help='default god:hidemyass')
+
     parser.add_argument('--addr',
                         default='127.0.0.1',
                         help='default 127.0.0.1')
@@ -1044,19 +1113,22 @@ if __name__ == "__main__":
                         default=1080,
                         help='default 1080')
 
+    parser.add_argument('--mode',
+                        choices=['slot', 'node'],
+                        default='node',
+                        help='default node')
+
     parser.add_argument('--processes',
                         default=multiprocessing.cpu_count(),
                         help='default cat /proc/cpuinfo | grep processor | wc -l')
 
-    debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
-    debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
-    for item in debug_level_list:
-        key = item[0]
-        parser.add_argument('--' + key, action='store_true', help='debug level settings')
+    parser.add_argument('--verbose',
+                        action='store_true',
+                        help='dump headers of request and response into stdout, it requires --processes=0')
 
     parser.add_argument('--http1.0',
                         action='store_true',
-                        help='force proxy server using HTTP/1.0')
+                        help='dump entry body of request and response into stdout, it requires --verbose')
 
     parser.add_argument('--error_log',
                         help='default /dev/null')
@@ -1067,9 +1139,17 @@ if __name__ == "__main__":
 
     parser.add_argument('--select', action='store_true')
 
+
     parser.add_argument('--stop',
                         action='store_true',
                         help='default start')
+
+    debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
+    debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
+    for item in debug_level_list:
+        key = item[0]
+        parser.add_argument('--' + key, action='store_true', help='debug level settings')
+
 
     args = parser.parse_args()
 

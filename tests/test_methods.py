@@ -8,14 +8,17 @@ FOLDER_PARENT = os.path.dirname(PWD)
 sys.path.insert(0, FOLDER_PARENT)
 
 import requests
+import requests.auth
 import config
+
+proxy_auth = requests.auth.HTTPProxyAuth(username=config.username, password=config.password)
 
 
 class TestMethodGET(unittest.TestCase):
 
     def test_method_head(self):
         url = 'http://tools.ietf.org/html/rfc868.html'
-        r = requests.head(url=url, proxies=config.proxies, timeout=config.timeout)
+        r = requests.head(url=url, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.text
 
@@ -24,7 +27,7 @@ class TestMethodGET(unittest.TestCase):
 
     def test_method_get(self):
         url = 'http://tools.ietf.org/html/rfc868.html'
-        r = requests.get(url=url, proxies=config.proxies, timeout=config.timeout)
+        r = requests.get(url=url, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.text
 
@@ -33,7 +36,7 @@ class TestMethodGET(unittest.TestCase):
 
     def test_method_post(self):
         url = 'http://httpbin.org/post'
-        r = requests.post(url=url, data={'foo': 'bar'}, proxies=config.proxies, timeout=config.timeout)
+        r = requests.post(url=url, data={'foo': 'bar'}, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.json()
 
@@ -42,7 +45,7 @@ class TestMethodGET(unittest.TestCase):
 
     def test_method_put(self):
         url = 'http://httpbin.org/put'
-        r = requests.put(url=url, data={'foo': 'bar'}, proxies=config.proxies, timeout=config.timeout)
+        r = requests.put(url=url, data={'foo': 'bar'}, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.json()
 
@@ -53,7 +56,7 @@ class TestMethodCONNECT(unittest.TestCase):
 
     def test_method_head(self):
         url = 'https://tools.ietf.org/html/rfc868.html'
-        r = requests.head(url=url, verify=False, proxies=config.proxies, timeout=config.timeout)
+        r = requests.head(url=url, verify=False, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.text
 
@@ -62,7 +65,7 @@ class TestMethodCONNECT(unittest.TestCase):
 
     def test_method_get(self):
         url = 'https://tools.ietf.org/html/rfc868.html'
-        r = requests.get(url=url, verify=False, proxies=config.proxies, timeout=config.timeout)
+        r = requests.get(url=url, verify=False, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.text
 
