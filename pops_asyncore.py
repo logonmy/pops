@@ -944,7 +944,7 @@ class HTTPServer(asyncore.dispatcher):
         """ Walking around the Thundering herd problem. """
         pid = os.getpid()
         if self.args.log_process_status:
-            self.server.log_message('-', 'the thundering herd problem, accept awake process, pid:%d', pid)
+            self.log_message('-', 'the thundering herd problem, accept awake process, pid:%d', pid)
 
         _ = self.accept()
         if not _:
