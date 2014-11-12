@@ -157,9 +157,8 @@ class HTTPMessage(object):
         self.headers = HTTPHeadersCaseSensitive(lines=lines[1:], ignores=ignores_headers)
 
     def is_chunked(self):
-        cl = self.headers.get_value('Content-Length')
         te = self.headers.get_value('Transfer-Encoding')
-        return cl is None and te and te.lower() == 'chunked'
+        return te and te.lower() == 'chunked'
 
     def __str__(self):
         lines = [self.start_line]
@@ -522,58 +521,71 @@ class ProxySender(async_chat_wrapper):
 
         self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
-        if self.receiver.msg_req.method.upper() != 'HEAD' and \
-                        self.msg_resp.status_code >= httplib.OK and \
-                        self.msg_resp.status_code not in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
 
-            conn = self.msg_resp.headers.get_value('Connection')
-            cl = self.msg_resp.headers.get_value('Content-Length')
+        field_cl = self.msg_resp.headers.get_value('Content-Length')
 
-            # For confirm to http://tools.ietf.org/html/rfc7230#section-3.3.3,
-            # we detect body if it encoding in chunked before content-length field existing.
-            if self.msg_resp.is_chunked():
-                if self.receiver.msg_req.version >= "HTTP/1.1":
-                    self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
-                    self.receiver.push(str(self.msg_resp))
-                    self.raw_msg = ''
+        # confirm to http://tools.ietf.org/html/rfc7230#section-3.3.3, rule 1
+        if self.receiver.msg_req.method.upper() == 'HEAD' or \
+                (self.msg_resp.status_code >= httplib.CONTINUE and self.msg_resp.status_code < httplib.OK) or \
+                        self.msg_resp.status_code in (httplib.NO_CONTENT, httplib.NOT_MODIFIED):
+            self.handle_body()
+            return
 
-                    self.user_agent_supports_transfer_encoding_chunked = True
-                else:
-                    self.msg_resp = HTTPResponse(msg=self.raw_msg, ignores_headers=['Transfer-Encoding'])
-                    self.receiver.push(str(self.msg_resp))
-                    self.raw_msg = ''
+        # We handle rule 2 in `self.handle_connect_event`.
+        if self.receiver.msg_req.method.upper() == "CONNECT":
+            assert False
 
-                    self.user_agent_not_supports_transfer_encoding_chunked = True
-
-                self.reading_chunk = True
-                self.set_terminator(CHUNK_EOL)
-                return
-
-            elif cl is not None:
-                try:
-                    cl = int(cl)
-                except ValueError:
-                    self.raw_msg = generate_resp(code=httplib.BAD_REQUEST)
-                    self.msg_resp = HTTPResponse(msg=self.raw_msg)
-                    self.handle_body()
-                    return
-
-                self.receiver.push(self.raw_msg)
+        # rule 3, detect body if it encoding in chunked before content-length field existing.
+        if self.msg_resp.is_chunked():
+            if self.receiver.msg_req.version >= "HTTP/1.1":
+                self.msg_resp.headers.add_header('Transfer-Encoding', 'chunked', override=True)
+                self.receiver.push(str(self.msg_resp))
                 self.raw_msg = ''
 
-                if cl > 0:
-                    self.set_terminator(cl)
-                    return
-
-                self.handle_body()
-
-            elif conn.lower() == 'close':
-                self.forward_until_conn_close = True
-                self.set_terminator(None)
+                self.user_agent_supports_transfer_encoding_chunked = True
             else:
+                self.msg_resp = HTTPResponse(msg=self.raw_msg, ignores_headers=['Transfer-Encoding'])
+                self.receiver.push(str(self.msg_resp))
+                self.raw_msg = ''
+
+                self.user_agent_not_supports_transfer_encoding_chunked = True
+
+            self.reading_chunk = True
+            self.set_terminator(CHUNK_EOL)
+            return
+
+        # rule 4 and rule 5
+        if field_cl is not None:
+            try:
+                field_cl = int(field_cl)
+            except ValueError:
+                self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
                 self.handle_body()
-        else:
-            self.handle_body()
+                self.handle_close()
+                return
+
+            self.receiver.push(self.raw_msg)
+            self.raw_msg = ''
+
+            if field_cl > 0:
+                self.set_terminator(field_cl)
+                return
+            elif field_cl < 0:
+                self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
+                self.handle_body()
+                self.handle_close()
+                return
+            else:
+                # rule 6
+                self.handle_body()
+                return
+
+        # rule 7
+        self.handle_body()
+        self.forward_until_conn_close = True
+        self.set_terminator(None)
 
     def handle_body(self):
         self.receiver.push(self.raw_msg)
@@ -829,9 +841,19 @@ class ProxyReceiver(async_chat_wrapper):
             if cl > 0:
                 # continue to receive request body
                 self.set_terminator(cl)
+            elif cl == 0:
+                self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+                self.handle_body()
             else:
-                # continue to receive next request
-                self.set_terminator(EOL)
+                self.raw_msg = generate_resp(code=httplib.BAD_REQUEST, close_it=True)
+                self.raw_msg_is_resp = True
+
+                # call `self.push` to send response directly, and `self.handle_body` for logging
+                self.push(self.raw_msg)
+                self.handle_body()
+
+                self.close_when_done()
+
         else:
             self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
             self.handle_body()
