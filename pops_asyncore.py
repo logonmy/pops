@@ -385,8 +385,6 @@ class async_chat_wrapper(asynchat.async_chat):
     def handle_chunk(self):
         raise NotImplemented
 
-    # def handle_tunnel(self):
-    #     raise NotImplemented
 
 
 class ProxySender(async_chat_wrapper):
@@ -498,10 +496,6 @@ class ProxySender(async_chat_wrapper):
         """ This function called after handle_connect_event. """
         if self.server.args.log_conn_status:
             self.server.log_message('-', 'connect to %s, fd:%d', self.address_string(), self.socket.fileno())
-
-    def handle_tunnel(self):
-        self.receiver.push(self.raw_msg)
-        self.raw_msg = ''
 
     def handle_close(self):
         if self.socket_closed:
