@@ -33,7 +33,7 @@ except ImportError:
     if sys.platform in ['linux2', 'darwin']:
         raise ImportError
 
-__version__ = "201411"
+__version__ = "20141113"
 
 
 DEFAULT_ERROR_MESSAGE = """\
@@ -68,6 +68,12 @@ class HTTPHeadersCaseSensitive(object):
         'Upgrade',
     )
 
+    # confirm to http://tools.ietf.org/html/rfc7230#section-3.2.2 `Field Order` and
+    # http://arxiv.org/pdf/cs/0105018v1.pdf `Appendix A.2.3`
+    HEADERS_NOT_COMBINE_IF_DUPLICATED = (
+        'Set-Cookie',
+    )
+
     def __init__(self, lines, ignores=None):
         self.headers = []
         self.parse_headers(lines, ignores)
@@ -75,7 +81,7 @@ class HTTPHeadersCaseSensitive(object):
     @staticmethod
     def contains(iterable, element):
         for i in iterable:
-            if i.lower() == element:
+            if i.lower() == element.lower():
                 return True
         return False
 
@@ -86,21 +92,15 @@ class HTTPHeadersCaseSensitive(object):
                 break
 
     def parse_headers(self, lines, ignores=None):
-        field_name_list = set()
         for line in lines:
             first_semicolon = line.index(':')
-            k, v = line[:first_semicolon], line[first_semicolon + 1:].strip()
+            k, v = line[:first_semicolon].strip(), line[first_semicolon + 1:].strip()
             k_lower = k.lower()
 
             if ignores and HTTPHeadersCaseSensitive.contains(ignores, k_lower):
                 continue
 
-            if k_lower in field_name_list:
-                self._merge_field_value(k, v)
-            else:
-                field_name_list.add(k.lower())
-                item = [k, v]
-                self.headers.append(item)
+            self.add_header(name=k, value=v)
 
     def get_value(self, name, default=None):
         for item in self.headers:
@@ -122,13 +122,15 @@ class HTTPHeadersCaseSensitive(object):
 
     def add_header(self, name, value, override=False):
         for item in self.headers:
-            if item[0].lower() == name.lower():
+            tmp_name = item[0].lower()
+            if tmp_name == name.lower():
                 if override:
                     item[1] = value
-                else:
+                    return
+                elif not HTTPHeadersCaseSensitive.contains(self.HEADERS_NOT_COMBINE_IF_DUPLICATED, name):
                     item[1] += ', ' + value
-                return
-        item = (name, value)
+                    return
+        item = [name, value]
         self.headers.append(item)
 
 
@@ -517,7 +519,7 @@ class ProxySender(async_chat_wrapper):
         self.raw_msg += terminator
 
         if self.server.args.log_resp_recv_header:
-            self.server.log_message('-', 'receive response headers: %s', repr(self.raw_msg.split(EOL)[0]))
+            self.server.log_message('-', "receive response headers: ''%s''", repr(self.raw_msg.split(EOL)[0]))
 
         self.msg_resp = HTTPResponse(msg=self.raw_msg)
 
@@ -565,7 +567,7 @@ class ProxySender(async_chat_wrapper):
                 self.handle_close()
                 return
 
-            self.receiver.push(self.raw_msg)
+            self.receiver.push(str(self.msg_resp))
             self.raw_msg = ''
 
             if field_cl > 0:
@@ -607,7 +609,7 @@ class ProxySender(async_chat_wrapper):
                     size=bytes)
 
             if self.server.args.log_req_recv_body:
-                self.server.log_message('-', 'receive request body: %s', repr(body))
+                self.server.log_message('-', "receive request body: ''%s''", repr(body))
 
         self.raw_msg = ''
         field_expect = self.receiver.msg_req.headers.get_value('Expect')
@@ -769,7 +771,7 @@ class ProxyReceiver(async_chat_wrapper):
         if self.server.args.log_req_recv_header:
             # We using `self.raw_msg` instead of `self.msg_req` for printing original headers information
             # without any transform and modifies.
-            self.server.log_message('-', 'receive request headers: %s', repr(self.raw_msg.split(EOL)[0]))
+            self.server.log_message('-', "receive request headers: ''%s''", repr(self.raw_msg.split(EOL)[0]))
 
         if self.msg_req.method.upper() == "CONNECT":
             self.handle_header_method_connect()
@@ -881,7 +883,7 @@ class ProxyReceiver(async_chat_wrapper):
                         size=bytes)
 
                 if self.server.args.log_resp_recv_body:
-                    self.server.log_message('-', 'receive response body: %s', repr(body))
+                    self.server.log_message('-', "receive response body: ''%s''", repr(body))
 
                 self.raw_msg_is_resp = False
 
