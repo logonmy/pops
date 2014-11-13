@@ -33,7 +33,7 @@ except ImportError:
     if sys.platform in ['linux2', 'darwin']:
         raise ImportError
 
-__version__ = "201411"
+__version__ = "20141113"
 
 
 DEFAULT_ERROR_MESSAGE = """\

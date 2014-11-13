@@ -23,16 +23,11 @@ HTTP proxy slot server
 
 Features
 
- - confirm to rfc2616
-   - supports method HEAD/GET/POST/CONNECT
+   - supports any standard methods
    - supports transfer-coding in chunked
    - supports content-encoding in gzip
-
- - confirm to rfc7235
-   - supports HTTP proxy basic authentication
-   - supports HTTP basic authentication
-
- - supports slot proxy for auto-throttle
+   - supports HTTP authentication
+   - supports slot proxy for auto-throttle
     - one domain per node, or multiple domains per node, it works with Web spider perfectly
     - auto check and kick node base on its up or down status
 
@@ -157,11 +152,3 @@ Stop
 
 NOTICE: update settings doesn't works right now.
 
-
-## See also
-
-RFC 2616 - Hypertext Transfer Protocol -- HTTP/1.1
-http://tools.ietf.org/html/rfc2616.html
-
-RFC 7235 - Hypertext Transfer Protocol (HTTP/1.1): Authentication
-http://tools.ietf.org/html/rfc7235.html

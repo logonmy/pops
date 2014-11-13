@@ -11,7 +11,6 @@ import os
 import BaseHTTPServer
 import httplib
 import multiprocessing
-import pdb
 import random
 import socket
 import sys
@@ -35,7 +34,7 @@ try:
 except ImportError:
     color = None
 
-__version__ = "201411"
+__version__ = "20141113"
 
 SERVER_RECV_TEIMOUT = 10.0
 
@@ -470,6 +469,12 @@ class HTTPHeadersCaseSensitive(object):
         'Upgrade',
     )
 
+    # confirm to http://tools.ietf.org/html/rfc7230#section-3.2.2 `Field Order` and
+    # http://arxiv.org/pdf/cs/0105018v1.pdf `Appendix A.2.3`
+    HEADERS_NOT_COMBINE_IF_DUPLICATED = (
+        'Set-Cookie',
+    )
+
     def __init__(self, lines, ignores=None):
         self.headers = []
         self.parse_headers(lines, ignores)
@@ -477,7 +482,7 @@ class HTTPHeadersCaseSensitive(object):
     @staticmethod
     def contains(iterable, element):
         for i in iterable:
-            if i.lower() == element:
+            if i.lower() == element.lower():
                 return True
         return False
 
@@ -488,21 +493,15 @@ class HTTPHeadersCaseSensitive(object):
                 break
 
     def parse_headers(self, lines, ignores=None):
-        field_name_list = set()
         for line in lines:
             first_semicolon = line.index(':')
-            k, v = line[:first_semicolon], line[first_semicolon + 1:].strip()
+            k, v = line[:first_semicolon].strip(), line[first_semicolon + 1:].strip()
             k_lower = k.lower()
 
             if ignores and HTTPHeadersCaseSensitive.contains(ignores, k_lower):
                 continue
 
-            if k_lower in field_name_list:
-                self._merge_field_value(k, v)
-            else:
-                field_name_list.add(k.lower())
-                item = [k, v]
-                self.headers.append(item)
+            self.add_header(name=k, value=v)
 
     def get_value(self, name, default=None):
         for item in self.headers:
@@ -524,13 +523,15 @@ class HTTPHeadersCaseSensitive(object):
 
     def add_header(self, name, value, override=False):
         for item in self.headers:
-            if item[0].lower() == name.lower():
+            tmp_name = item[0].lower()
+            if tmp_name == name.lower():
                 if override:
                     item[1] = value
-                else:
+                    return
+                elif not HTTPHeadersCaseSensitive.contains(self.HEADERS_NOT_COMBINE_IF_DUPLICATED, name):
                     item[1] += ', ' + value
-                return
-        item = (name, value)
+                    return
+        item = [name, value]
         self.headers.append(item)
 
 
@@ -1292,6 +1293,24 @@ class POPServer(BaseHTTPServer.HTTPServer):
     def server_address_string(self):
         return '%s:%d' % (self.server_address[0], self.server_address[1])
 
+class DebugLevel(object):
+
+    log_process_status = 1 << 1
+
+    log_conn_status = 1 << 2
+    log_io_status = 1 << 3
+
+    log_access = 1 << 4
+
+    log_req_recv_header = 1 << 5
+    log_req_recv_body = 1 << 6
+
+    log_resp_recv_header = 1 << 7
+    log_resp_recv_body = 1 << 8
+
+    log_all_in = 1 << 9
+    log_all_out = 1 << 10
+
 
 def main(args):
     server_address = (args.addr, args.port)
@@ -1393,7 +1412,9 @@ class MyDaemon(object):
 if __name__ == "__main__":
     multiprocessing.freeze_support()
 
-    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS', version=__version__)
+    parser = argparse.ArgumentParser(prog=sys.argv[0], description='POPS')
+
+    parser.add_argument('--version', action='version', version=__version__)
 
     parser.add_argument('--auth',
                         default='god:hidemyass',
@@ -1443,6 +1464,13 @@ if __name__ == "__main__":
     parser.add_argument('--stop',
                         action='store_true',
                         help='default start')
+
+
+    debug_level_list = [(key, val) for key, val in DebugLevel.__dict__.iteritems() if not key.startswith('_')]
+    debug_level_list.sort(cmp=lambda a, b: a[1] - b[1])
+    for item in debug_level_list:
+        key = item[0]
+        parser.add_argument('--' + key, action='store_true', help='debug level settings')
 
     args = parser.parse_args()
 

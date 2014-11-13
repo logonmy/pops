@@ -4,20 +4,21 @@ import os
 import sys
 import unittest
 
-import requests
-
 PWD = os.path.dirname(os.path.realpath(__file__))
 FOLDER_PARENT = os.path.dirname(PWD)
 sys.path.insert(0, FOLDER_PARENT)
 
+import requests
+import requests.auth
 import config
+proxy_auth = requests.auth.HTTPProxyAuth(username=config.username, password=config.password)
 
 
 class TestBodyInGzip(unittest.TestCase):
 
     def test_it(self):
         url = 'http://httpbin.org/gzip'
-        r = requests.get(url=url, proxies=config.proxies, timeout=config.timeout)
+        r = requests.get(url=url, proxies=config.proxies, timeout=config.timeout, auth=proxy_auth)
         status_code = r.status_code
         entry_body = r.json()
 
