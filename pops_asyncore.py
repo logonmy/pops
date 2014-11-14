@@ -35,7 +35,7 @@ except ImportError:
     if sys.platform in ['linux2', 'darwin']:
         raise ImportError
 
-__version__ = "20141113-r3"
+__version__ = "20141113-r4"
 
 
 DEFAULT_ERROR_MESSAGE = """\
@@ -437,6 +437,12 @@ class ProxySender(async_chat_wrapper):
             self.receiver.push(data)
         elif self.forward_until_conn_close:
             self.receiver.push(data)
+
+            # fix some responses status is 200, no content-length, no transfer-encoding, and has body
+            # http://ptlogin2.qq.com/login?u=2694602258&p=B1C19656A57A7C5EE6FE27BBB23005E7&verifycode=AZVK&remember_uin=1&aid=21000501&u1=http%3A%2F%2Flol.qq.com%2Fweb201310%2Fpersonal.shtml%3Fid%3D4002759564%26area%3D1&h=1&ptredirect=0&ptlang=2052&daid=8&from_ui=1&pttype=1&dumy=&fp=loginerroralert&action=7-6-16453&t=1&g=1&js_type=0&js_ver=10082&login_sig=TP9wTzL3iAce31-Le8sOnne4hKpmulq3lmb2Do7SXLQZvnkZGMreEdZV6wOgQ9s8&pt_uistyle=20
+            if data.endswith(CHUNK_EOL):
+                self.set_terminator(EOL)
+                self.receiver.close_when_done()
         else:
             self.raw_msg += data
 

@@ -34,9 +34,9 @@ try:
 except ImportError:
     color = None
 
-__version__ = "20141113-r3"
+__version__ = "20141113-r4"
 
-SERVER_RECV_TEIMOUT = 10.0
+SERVER_RECV_TIMEOUT = 10.0
 
 RECV_BUF_SIZE = 8192
 
@@ -791,7 +791,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # If client doesn't send request in 3 seconds,
         # server will auto terminate it.
         # See also: http://yyz.us/bitcoin/poold.py
-        self.request.settimeout(SERVER_RECV_TEIMOUT)
+        self.request.settimeout(SERVER_RECV_TIMEOUT)
 
         self.headers_case_sensitive = None
 
