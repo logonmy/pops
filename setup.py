@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 from distutils.core import setup
-from pops import __version__ as version
+from pops_asyncore import __version__ as version
 
 setup(
     name='pypops',

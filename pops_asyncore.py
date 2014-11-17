@@ -35,7 +35,7 @@ except ImportError:
     if sys.platform in ['linux2', 'darwin']:
         raise ImportError
 
-__version__ = "20141113-r4"
+__version__ = "20141113-r5"
 
 
 DEFAULT_ERROR_MESSAGE = """\
@@ -321,11 +321,23 @@ class HTTPHelper(object):
             else:
                 host, port = splits[0], 80
         else:
-            splits = parses.path.split(':')
-            if len(splits) == 2:
-                host, port = splits[0], int(splits[1])
+            """
+            NOTICE: The returns of urlparse.urlparse('google.com:443') are different on python version.
+
+            # Python 2.7.6 on Ubuntu 12.04+
+            ParseResult(scheme='', netloc='', path='google.com:443', params='', query='', fragment='')
+
+            # Python 2.6.5 on Ubuntu 10.04+
+            ParseResult(scheme='google.com', netloc='', path='443', params='', query='', fragment='')
+            """
+            if sys.version_info[0] == 2 and sys.version_info[1] > 6:
+                splits = parses.path.split(':')
+                if len(splits) == 2:
+                    host, port = splits[0], int(splits[1])
+                else:
+                    host, port = splits[0], 443
             else:
-                host, port = splits[0], 443
+                host, port = parses.scheme, int(parses.path)
         return (host, port)
 
     @staticmethod
@@ -1037,7 +1049,7 @@ class HTTPServer(asyncore.dispatcher):
         """ Walking around the Thundering herd problem. """
         pid = os.getpid()
         if self.args.log_process_status:
-            self.server.log_message('-', 'the thundering herd problem, accept awake process, pid:%d', pid)
+            self.log_message('-', 'the thundering herd problem, accept awake process, pid:%d', pid)
 
         _ = self.accept()
         if not _:
