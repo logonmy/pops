@@ -34,11 +34,13 @@ try:
 except ImportError:
     color = None
 
-__version__ = "20141113"
+__version__ = "20141113-r5"
 
-SERVER_RECV_TEIMOUT = 10.0
+SERVER_RECV_TIMEOUT = 10.0
 
 RECV_BUF_SIZE = 8192
+
+EOL = '\r\n\r\n'
 
 
 class StringHelper(object):
@@ -69,7 +71,91 @@ class HTTPHelper(object):
         else:
             print >>sys.stdout, StringHelper.cut_long_str_for_human(body)
 
+    @staticmethod
+    def is_proxy_request(s):
+        """
+        request_uri => 'http://baidu.com'
+        parses.scheme => 'http://'
+        parses.netloc => 'baidu.com'
+        parses.path => '/'
 
+        request_uri => '/index.html'
+        parses.scheme => ''
+        parses.netloc => ''
+        parses.path => '/index.html
+        """
+        parses = urlparse.urlparse(s)
+        return parses.scheme and parses.netloc
+
+    @staticmethod
+    def parse_request_uri_from_urlparse(parses):
+        request_uri = parses.path or '/'
+        if parses.query:
+            request_uri += '?' + parses.query
+        if parses.fragment:
+            request_uri += '#' + parses.fragment
+        return request_uri
+
+    @staticmethod
+    def parse_addr_from_request_uri(uri):
+        """
+        >>> uri = "http://tools.ietf.org/html/rfc868.html"
+        >>> HTTPHelper.parse_addr_from_request_uri(uri) == 'tools.ietf.org:80'
+        True
+        >>> uri = 'google.com:443'
+        >>> HTTPHelper.parse_addr_from_request_uri(uri) == 'google.com:443'
+        True
+        """
+        parses = urlparse.urlparse(uri)
+        if parses.netloc:
+            splits = parses.netloc.split(':')
+            if len(splits) == 2:
+                host, port = splits[0], int(splits[1])
+            else:
+                host, port = splits[0], 80
+        else:
+            """
+            NOTICE: The returns of urlparse.urlparse('google.com:443') are different on python version.
+
+            # Python 2.7.6 on Ubuntu 12.04+
+            ParseResult(scheme='', netloc='', path='google.com:443', params='', query='', fragment='')
+
+            # Python 2.6.5 on Ubuntu 10.04+
+            ParseResult(scheme='google.com', netloc='', path='443', params='', query='', fragment='')
+            """
+            if sys.version_info[0] == 2 and sys.version_info[1] > 6:
+                splits = parses.path.split(':')
+                if len(splits) == 2:
+                    host, port = splits[0], int(splits[1])
+                else:
+                    host, port = splits[0], 443
+            else:
+                host, port = parses.scheme, int(parses.path)
+        return (host, port)
+
+    @staticmethod
+    def rewriteReqForProxy(msg_req):
+        """
+        translate absoluteURI to abs_path
+        filter headers for forward request
+        """
+        HEADERS_DROP_FOR_PROXY = ('Proxy-Connection', )
+        HEADERS_DROP = HTTPHeadersCaseSensitive.HOP_BY_HOP_HEADERS + HEADERS_DROP_FOR_PROXY
+
+        parses = urlparse.urlparse(msg_req.request_uri)
+        request_uri = HTTPHelper.parse_request_uri_from_urlparse(parses)
+
+        start_line = msg_req.method + ' ' + request_uri + ' ' + msg_req.version
+        lines = [start_line]
+        for item in msg_req.headers.headers:
+            k_lower = item[0]
+            if HTTPHeadersCaseSensitive.contains(HEADERS_DROP, k_lower):
+                continue
+            line = '%s: %s' % (item[0], item[1])
+            lines.append(line)
+        body = msg_req.body or ''
+        msg = '\r\n'.join(lines) + EOL + body
+        return msg
 
 def print_io(a, b, dir, data):
     ts_prefix = str(datetime.datetime.today())[:19]
@@ -791,7 +877,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
         # If client doesn't send request in 3 seconds,
         # server will auto terminate it.
         # See also: http://yyz.us/bitcoin/poold.py
-        self.request.settimeout(SERVER_RECV_TEIMOUT)
+        self.request.settimeout(SERVER_RECV_TIMEOUT)
 
         self.headers_case_sensitive = None
 
@@ -827,7 +913,7 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
 
     def is_valid_proxy_req(self):
         parses = urlparse.urlparse(self.path) # self.path => 'http://baidu.com'
-        if parses.scheme and parses.netloc: # parses.scheme => 'http://', parses.netloc => 'baidu.com'
+        if HTTPHelper.is_proxy_request(self.path): # parses.scheme => 'http://', parses.netloc => 'baidu.com'
             OTHERS_DROP_HEADERS = ('Proxy-Connection', )
             self.headers_case_sensitive = HTTPHeadersCaseSensitive(
                 lines=self.headers.headers,
@@ -1064,13 +1150,8 @@ class HandlerClass(BaseHTTPServer.BaseHTTPRequestHandler):
             request_uri = self.path
         else:
             parses = urlparse.urlparse(self.path)
-            sock_addr = parses.netloc
-
-            splits = sock_addr.split(':')
-            if len(splits) == 2:
-                host, port = splits[0], int(splits[1])
-            else:
-                host, port = splits[0], 80
+            host, port = HTTPHelper.parse_addr_from_request_uri(self.path)
+            sock_addr = '%s:%d' % (host, port)
 
             hostname, aliaslist, ipaddrlist = socket.gethostbyname_ex(host)
             ip_addr = random.choice(ipaddrlist)

@@ -1,3 +1,5 @@
+#!/usr/bin/env python
+#-*- coding:utf-8 -*-
 """
 Rewritten pops in asyncore and asyncore_patch.
 
@@ -33,7 +35,7 @@ except ImportError:
     if sys.platform in ['linux2', 'darwin']:
         raise ImportError
 
-__version__ = "20141113"
+__version__ = "20141113-r5"
 
 
 DEFAULT_ERROR_MESSAGE = """\
@@ -319,11 +321,23 @@ class HTTPHelper(object):
             else:
                 host, port = splits[0], 80
         else:
-            splits = parses.path.split(':')
-            if len(splits) == 2:
-                host, port = splits[0], int(splits[1])
+            """
+            NOTICE: The returns of urlparse.urlparse('google.com:443') are different on python version.
+
+            # Python 2.7.6 on Ubuntu 12.04+
+            ParseResult(scheme='', netloc='', path='google.com:443', params='', query='', fragment='')
+
+            # Python 2.6.5 on Ubuntu 10.04+
+            ParseResult(scheme='google.com', netloc='', path='443', params='', query='', fragment='')
+            """
+            if sys.version_info[0] == 2 and sys.version_info[1] > 6:
+                splits = parses.path.split(':')
+                if len(splits) == 2:
+                    host, port = splits[0], int(splits[1])
+                else:
+                    host, port = splits[0], 443
             else:
-                host, port = splits[0], 443
+                host, port = parses.scheme, int(parses.path)
         return (host, port)
 
     @staticmethod
@@ -356,6 +370,10 @@ CHUNK_EOL = '\r\n'
 
 
 class async_chat_wrapper(asynchat.async_chat):
+
+    ac_in_buffer_size = 8192
+    ac_out_buffer_size = 8192
+
 
     weekdayname = BaseHTTPServer.BaseHTTPRequestHandler.weekdayname
     monthname = BaseHTTPServer.BaseHTTPRequestHandler.monthname
@@ -409,6 +427,9 @@ class ProxySender(async_chat_wrapper):
         self.is_tunnel = False
         self.forward_until_conn_close = False
 
+        self.forward_very_long_body_has_content_length = False
+        self.very_long_body_remain = 0
+
         self.set_terminator(EOL)
 
         self.socket_closed = False
@@ -428,6 +449,12 @@ class ProxySender(async_chat_wrapper):
             self.receiver.push(data)
         elif self.forward_until_conn_close:
             self.receiver.push(data)
+
+            # fix some responses status is 200, no content-length, no transfer-encoding, and has body
+            # http://ptlogin2.qq.com/login?u=2694602258&p=B1C19656A57A7C5EE6FE27BBB23005E7&verifycode=AZVK&remember_uin=1&aid=21000501&u1=http%3A%2F%2Flol.qq.com%2Fweb201310%2Fpersonal.shtml%3Fid%3D4002759564%26area%3D1&h=1&ptredirect=0&ptlang=2052&daid=8&from_ui=1&pttype=1&dumy=&fp=loginerroralert&action=7-6-16453&t=1&g=1&js_type=0&js_ver=10082&login_sig=TP9wTzL3iAce31-Le8sOnne4hKpmulq3lmb2Do7SXLQZvnkZGMreEdZV6wOgQ9s8&pt_uistyle=20
+            if data.endswith(CHUNK_EOL):
+                self.set_terminator(EOL)
+                self.receiver.close_when_done()
         else:
             self.raw_msg += data
 
@@ -442,6 +469,8 @@ class ProxySender(async_chat_wrapper):
         elif isinstance(terminator, (int, long)):
             if self.reading_chunk:
                 self.handle_chunk()
+            elif self.forward_very_long_body_has_content_length:
+                self.handle_forward_very_long_body_has_content_length()
             else:
                 self.handle_body()
         else:
@@ -511,8 +540,8 @@ class ProxySender(async_chat_wrapper):
 
         # Sometime upstream/origin server close actively,
         # We have to disconnect client connection after it.
-        if not self.receiver.socket_closed:
-           self.receiver.handle_close()
+        # if not self.receiver.socket_closed:
+        #    self.receiver.handle_close()
 
     def handle_header(self):
         terminator = self.get_terminator()
@@ -571,7 +600,13 @@ class ProxySender(async_chat_wrapper):
             self.raw_msg = ''
 
             if field_cl > 0:
-                self.set_terminator(field_cl)
+                if field_cl <= self.ac_in_buffer_size:                    
+                    self.set_terminator(field_cl)
+                else:
+                    # forward very long data in segment for speeding up
+                    self.forward_very_long_body_has_content_length = True
+                    self.very_long_body_remain = field_cl - self.ac_in_buffer_size
+                    self.set_terminator(self.ac_in_buffer_size)
                 return
             elif field_cl < 0:
                 self.raw_msg = generate_resp(code=httplib.BAD_GATEWAY)
@@ -663,6 +698,27 @@ class ProxySender(async_chat_wrapper):
         else:
             raise Exception
 
+    def handle_forward_very_long_body_has_content_length(self):
+        self.receiver.push(self.raw_msg)
+        self.raw_msg = ''
+
+        if self.very_long_body_remain > self.ac_in_buffer_size:
+            self.very_long_body_remain -= self.ac_in_buffer_size
+            self.set_terminator(self.ac_in_buffer_size)
+        elif self.very_long_body_remain > 0:
+            self.set_terminator(self.very_long_body_remain)
+            self.very_long_body_remain = 0
+        elif self.very_long_body_remain == 0:
+            self.set_terminator(EOL)
+            self.forward_very_long_body_has_content_length = False        
+            
+            if self.server.args.log_access:
+                bytes = int(self.msg_resp.headers.get_value('Content-Length'))
+                self.server.log_request(
+                    addr_client=self.receiver.addr_client[0],
+                    request_line=self.receiver.msg_req.request_line,
+                    code=self.msg_resp.status_code,
+                    size=bytes)            
 
 def required_proxy_auth(func):
     def check_proxy_authorization(handler_obj):
