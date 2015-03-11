@@ -341,7 +341,7 @@ class HTTPHelper(object):
         return (host, port)
 
     @staticmethod
-    def rewriteReqForProxy(msg_req):
+    def rewriteReqForProxy(msg_req, lines_extra=None):
         """
         translate absoluteURI to abs_path
         filter headers for forward request
@@ -360,6 +360,10 @@ class HTTPHelper(object):
                 continue
             line = '%s: %s' % (item[0], item[1])
             lines.append(line)
+
+        if lines_extra:
+            lines.extend(lines_extra)
+
         body = msg_req.body or ''
         msg = '\r\n'.join(lines) + EOL + body
         return msg
@@ -483,19 +487,21 @@ class ProxySender(async_chat_wrapper):
         except socket.error, ex:
             if ex.errno == errno.ECONNREFUSED:
                 # privoxy 3.0.21 responses 503 in this situation, should we response BAD_GATEWAY instead?
-                msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
+                self.raw_msg = generate_resp(code=httplib.SERVICE_UNAVAILABLE,
                                     reason='Connect failed',
                                     close_it=True,
                               protocol_version=self.server.protocol_version)
-                self.receiver.push(msg)
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
+                self.handle_body()
                 self.close_when_done()
 
                 if self.server.args.log_conn_status:
                     self.server.log_message('-', 'connect to %s refused', self.address_string())
             elif ex.errno == errno.ETIMEDOUT:
-                msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
+                self.raw_msg = generate_resp(code=httplib.GATEWAY_TIMEOUT,
                               protocol_version=self.server.protocol_version)
-                self.receiver.push(msg)
+                self.msg_resp = HTTPResponse(msg=self.raw_msg)
+                self.handle_body()
                 self.close_when_done()
 
                 if self.server.args.log_conn_status:
@@ -540,8 +546,11 @@ class ProxySender(async_chat_wrapper):
 
         # Sometime upstream/origin server close actively,
         # We have to disconnect client connection after it.
-        # if not self.receiver.socket_closed:
-        #    self.receiver.handle_close()
+        if not self.receiver.socket_closed:
+            if not len(self.receiver.producer_fifo):
+                self.receiver.handle_close()
+            else:
+                self.receiver.close_when_done()
 
     def handle_header(self):
         terminator = self.get_terminator()
@@ -550,7 +559,29 @@ class ProxySender(async_chat_wrapper):
         if self.server.args.log_resp_recv_header:
             self.server.log_message('-', "receive response headers: ''%s''", repr(self.raw_msg.split(EOL)[0]))
 
+#        print
+#        if self.receiver.raw_msg:
+#            print repr(self.receiver.raw_msg)
+#        print repr(terminator)
+#        print '-' * 80
+#        print
+
+        if not self.raw_msg or self.raw_msg == EOL:
+            self.handle_close()
+            return
+
         self.msg_resp = HTTPResponse(msg=self.raw_msg)
+
+
+        field_conn = self.msg_resp.headers.get_value('Connection')
+
+        if self.receiver.msg_req.version >= "HTTP/1.1" and self.server.protocol_version >= "HTTP/1.1":
+            if not field_conn:
+                field_conn = "keep-alive"
+        else:
+            if not field_conn or self.server.protocol_version < "HTTP/1.1":
+                field_conn = "close"
+        self.msg_resp.headers.add_header(name='Connection', value=field_conn, override=True)
 
 
         field_cl = self.msg_resp.headers.get_value('Content-Length')
@@ -605,7 +636,7 @@ class ProxySender(async_chat_wrapper):
                 else:
                     # forward very long data in segment for speeding up
                     self.forward_very_long_body_has_content_length = True
-                    self.very_long_body_remain = field_cl - self.ac_in_buffer_size
+                    self.very_long_body_remain = field_cl
                     self.set_terminator(self.ac_in_buffer_size)
                 return
             elif field_cl < 0:
@@ -645,6 +676,15 @@ class ProxySender(async_chat_wrapper):
 
             if self.server.args.log_req_recv_body:
                 self.server.log_message('-', "receive request body: ''%s''", repr(body))
+
+        field_conn = self.msg_resp.headers.get_value('Connection')
+        if field_conn and field_conn.lower() == 'close':
+            self.handle_close()
+
+            self.raw_msg = ''
+            self.msg_resp = None
+
+            return
 
         self.raw_msg = ''
         field_expect = self.receiver.msg_req.headers.get_value('Expect')
@@ -699,17 +739,19 @@ class ProxySender(async_chat_wrapper):
             raise Exception
 
     def handle_forward_very_long_body_has_content_length(self):
+        recv_bytes = len(self.raw_msg)
+        self.very_long_body_remain -= recv_bytes
+
         self.receiver.push(self.raw_msg)
         self.raw_msg = ''
 
         if self.very_long_body_remain > self.ac_in_buffer_size:
-            self.very_long_body_remain -= self.ac_in_buffer_size
             self.set_terminator(self.ac_in_buffer_size)
         elif self.very_long_body_remain > 0:
             self.set_terminator(self.very_long_body_remain)
             self.very_long_body_remain = 0
         elif self.very_long_body_remain == 0:
-            self.set_terminator(EOL)
+
             self.forward_very_long_body_has_content_length = False        
             
             if self.server.args.log_access:
@@ -719,6 +761,13 @@ class ProxySender(async_chat_wrapper):
                     request_line=self.receiver.msg_req.request_line,
                     code=self.msg_resp.status_code,
                     size=bytes)            
+
+            field_conn = self.msg_resp.headers.get_value('Connection')
+            if not field_conn or field_conn.lower() != "keepalive":
+                self.handle_close()
+            else:
+                self.set_terminator(EOL)
+
 
 def required_proxy_auth(func):
     def check_proxy_authorization(handler_obj):
@@ -876,6 +925,7 @@ class ProxyReceiver(async_chat_wrapper):
                           protocol_version=self.server.protocol_version)
                 self.raw_msg_is_resp = True
                 self.handle_body()
+                self.handle_close()
                 return
 
             elif err_no == errno.ETIMEDOUT:
@@ -884,23 +934,34 @@ class ProxyReceiver(async_chat_wrapper):
                               protocol_version=self.server.protocol_version)
                 self.raw_msg_is_resp = True
                 self.handle_body()
+                self.handle_close()
                 return
             else:
                 raise ex
 
         field_cl = self.msg_req.headers.get_value('Content-Length')
+        field_conn = self.msg_req.headers.get_value('Connection') or self.msg_req.headers.get_value('Proxy-Connection')
+        if self.msg_req.version >= "HTTP/1.1" and self.server.protocol_version >= "HTTP/1.1":
+            if not field_conn:
+                field_conn = "keep-alive"
+        else:
+            if not field_conn or self.server.protocol_version < "HTTP/1.1":
+                field_conn = "close"
+        line_conn = 'Connection: %s' % field_conn
+        # self.msg_req.headers.add_header(name='Connection', value=field_conn, override=True)
+
         if field_cl is not None:
             cl = int(field_cl)
 
-            msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
-            self.sender.push(msg)
+            part_of_msg = HTTPHelper.rewriteReqForProxy(self.msg_req, lines_extra=[line_conn])
+            self.sender.push(part_of_msg)
             self.raw_msg = ''
 
             if cl > 0:
                 # continue to receive request body
                 self.set_terminator(cl)
             elif cl == 0:
-                self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+                self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req, lines_extra=[line_conn])
                 self.handle_body()
             else:
                 self.raw_msg = generate_resp(code=httplib.BAD_REQUEST, close_it=True)
@@ -913,7 +974,7 @@ class ProxyReceiver(async_chat_wrapper):
                 self.close_when_done()
 
         else:
-            self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req)
+            self.raw_msg = HTTPHelper.rewriteReqForProxy(self.msg_req, lines_extra=[line_conn])
             self.handle_body()
 
     def handle_body(self):
