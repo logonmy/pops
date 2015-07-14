@@ -29,6 +29,9 @@ import socket
 import sys
 import urlparse
 
+import dns
+import ipaddress
+
 try:
     from daemon import runner
 except ImportError:
@@ -409,6 +412,92 @@ class async_chat_wrapper(asynchat.async_chat):
         raise NotImplemented
 
 
+class DomainNameResolver(async_chat_wrapper):
+    def __init__(self, proxy_receiver, proxy_sender, addr_origin_server, socket_map):
+        # print 'DomainNameResolver called'
+
+        async_chat_wrapper.__init__(self, map=socket_map)
+
+        self.raw_msg = ''
+
+        self.server = proxy_receiver.server
+        self.receiver = proxy_receiver
+        self.sender = proxy_sender
+
+        self.addr_origin_server = addr_origin_server
+
+        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.connect((dns.NS_SERVER, dns.NS_PORT))
+
+        self.set_terminator(2)
+
+    def handle_connect_event(self):
+        """ This function called before handle_connect_event. """
+        async_chat_wrapper.handle_connect_event(self)
+
+        domain_name = self.addr_origin_server[0]
+
+        mp = dns.MessagePacker()
+        mp.set_header()
+        mp.set_question(qname=domain_name, qtype=dns.TypeValue.A, qclass=dns.ClassValue.IN)
+        msg_req = mp.get_buf()
+        data = dns.HelperBitwise.pack16bit(len(msg_req)) + msg_req
+        self.push(data)
+
+        if self.server.args.log_all_out:
+            self.server.log_message('-', 'out: %s, %s', repr(data), repr(self.get_terminator()))
+
+    def collect_incoming_data(self, data):
+        if self.server.args.log_all_in:
+            self.server.log_message('-', 'in: %s, %s', repr(data), repr(self.get_terminator()))
+
+        self.raw_msg += data
+
+    def found_terminator(self):
+        # print 'DomainNameResolver found_terminator called'
+        # terminator = self.get_terminator()
+
+        if len(self.raw_msg) == 2:
+            field_len = self.raw_msg
+            self.raw_msg = ''
+
+            msg_len = dns.HelperBitwise.unpack16bit(field_len)
+            self.set_terminator(msg_len)
+        else:
+            self.handle_response()
+
+    def handle_response(self):
+        domain_name = self.addr_origin_server[0]
+        port = self.addr_origin_server[1]
+
+        reply = self.raw_msg
+
+        parser = dns.MessageResponseParser(domain_name=domain_name, s=reply)
+        ip_addr_list = parser.ip_address_list
+
+        if not parser.ip_address_list:
+            # print 'DomainNameResolver parser.ip_address_list is empty'
+            self.sender.close()
+            self.receiver.close()
+            self.close()
+        else:
+            for ip_addr in ip_addr_list:
+                self.sender.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+                self.sender.connect((ip_addr, port))
+
+                self.set_terminator(EOL)
+                self.close_when_done()
+                return
+
+        raise Exception("resolve domain name %s failed" % domain_name)
+
+
+def is_ip_addr(name_or_ip_addr):
+    try:
+        ipaddress.IPv4Address(name_or_ip_addr)
+        return True
+    except ipaddress.AddressValueError:
+        return False
 
 class ProxySender(async_chat_wrapper):
 
@@ -438,8 +527,16 @@ class ProxySender(async_chat_wrapper):
 
         self.socket_closed = False
 
-        self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.connect(self.addr_origin_server)
+        name_or_ip_addr = self.addr_origin_server[0]
+        if is_ip_addr(name_or_ip_addr):
+            self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.connect(self.addr_origin_server)
+        else:
+            self.domain_name_resolver = DomainNameResolver(
+                proxy_receiver=self.receiver,
+                proxy_sender=self,
+                addr_origin_server=addr_origin_server,
+                socket_map=self._map)
 
     @property
     def address(self):
