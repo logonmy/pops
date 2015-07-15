@@ -635,11 +635,12 @@ class ProxySender(async_chat_wrapper):
             return
         self.socket_closed = True
 
-        fd = self.socket.fileno()
-        async_chat_wrapper.handle_close(self)
+        if self.socket:
+            fd = self.socket.fileno()
+            async_chat_wrapper.handle_close(self)
 
-        if self.server.args.log_conn_status:
-            self.server.log_message('-', 'origin-server %s disconnect, fd:%d', self.address_string(), fd)
+            if self.server.args.log_conn_status:
+                self.server.log_message('-', 'origin-server %s disconnect, fd:%d', self.address_string(), fd)
 
         # Sometime upstream/origin server close actively,
         # We have to disconnect client connection after it.
